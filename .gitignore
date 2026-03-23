@@ -1,0 +1,25 @@
+# Environment variables
+.env
+.env.*
+!.env.example
+!.env.template
+
+# Data directory contains sensitive credentials
+data/
+
+# Scripts contain hardcoded connection details
+backend/scripts/
+
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+*.egg-info/
+
+# macOS
+.DS_Store
+
+# Node
+node_modules/

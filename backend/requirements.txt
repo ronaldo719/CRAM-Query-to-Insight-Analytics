@@ -1,0 +1,28 @@
+# =============================================================================
+# Query-to-Insight Backend Dependencies
+# =============================================================================
+# Install with: pip install -r requirements.txt
+#
+# Core framework
+fastapi==0.115.*
+uvicorn[standard]==0.34.*
+gunicorn==23.*                  # Production WSGI server for Azure App Service
+python-dotenv==1.1.*
+
+# Azure OpenAI / Direct OpenAI
+openai==1.82.*
+
+# Azure SQL Database
+pyodbc==5.2.*
+
+# SQL validation (parses LLM-generated SQL into AST for security checks)
+sqlglot==26.*
+
+# Azure Content Safety (Responsible AI input/output screening)
+azure-ai-contentsafety==1.0.*
+
+# Application Insights (telemetry and monitoring)
+opencensus-ext-azure==1.1.*
+
+# Pydantic (data validation, already included with FastAPI but pinned for clarity)
+pydantic==2.*
