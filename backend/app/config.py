@@ -36,7 +36,7 @@ class Settings:
     sql_connection_string: str = os.getenv("AZURE_SQL_CONNECTION_STRING", "")
     sql_readonly_connection_string: str = os.getenv("AZURE_SQL_READONLY_CONNECTION_STRING", "")
 
-    # ── Azure OpenAI (Path A) ─────────────────────────────────
+    # ── Azure OpenAI ─────────────────────────────────
     use_azure_openai: bool = os.getenv("USE_AZURE_OPENAI", "true").lower() == "true"
     azure_openai_endpoint: str = os.getenv("AZURE_OPENAI_ENDPOINT", "")
     azure_openai_key: str = os.getenv("AZURE_OPENAI_KEY", "")
@@ -44,8 +44,8 @@ class Settings:
     azure_openai_api_version: str = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
 
     # ── Direct OpenAI Fallback (Path B) ───────────────────────
-    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
-    openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    # openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
+    # openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
     # ── Azure Content Safety ──────────────────────────────────
     content_safety_endpoint: str = os.getenv("CONTENT_SAFETY_ENDPOINT", "")
