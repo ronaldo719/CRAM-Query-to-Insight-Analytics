@@ -14,12 +14,13 @@ roles instantly via a dropdown in the UI. The backend uses this to load
 the user's RoleContext, which flows through every step of the pipeline.
 """
 
-from fastapi import APIRouter, Header
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from typing import Optional
 import time
 
 from app.config import settings, get_openai_client
+from app.dependencies.auth import get_current_user
 
 router = APIRouter()
 
@@ -121,25 +122,26 @@ async def get_roles():
 @router.post("/ask", response_model=QueryResponse)
 async def ask_question(
     request: QueryRequest,
-    x_user_id: str = Header(default="demo_admin", alias="X-User-Id"),
+    user: dict = Depends(get_current_user),
 ):
     """
     Accept a natural language question and return an AI-generated answer.
 
-    Day 1: Returns a stubbed response that proves the API contract works.
-    Day 2: Full pipeline — RBAC lookup → Content Safety → LLM SQL generation
-            → sqlglot validation → SQL rewriting → execution → explanation.
+    Authentication is handled via JWT token in the Authorization header.
+    The user's role is extracted from the token and determines what data
+    they can access. Admins can impersonate other users via the
+    X-Impersonate header (handled by the auth dependency).
 
-    The X-User-Id header determines which demo role is active. The frontend
-    sends this from its role switcher dropdown. Try switching between
-    'demo_doctor', 'demo_billing', and 'demo_researcher' to see how the
-    same question produces different access levels.
+    Day 1: Returns a stubbed response with real LLM-generated SQL.
+    Day 2: Full pipeline — RBAC → Content Safety → SQL generation
+            → validation → rewriting → execution → explanation.
     """
     start_time = time.time()
 
-    # ── Day 2: These will be replaced with real implementations ───
-    # For now, we call the LLM with a simple prompt to verify the
-    # OpenAI connection works end-to-end through the API.
+    # The user dict comes from JWT (or impersonation if admin)
+    user_id = user.get("external_id", "unknown")
+    role_name = user.get("role_name", "unknown")
+    display_name = user.get("display_name", "Unknown User")
 
     client = get_openai_client()
     model = settings.model_name
@@ -176,7 +178,7 @@ async def ask_question(
     # Day 2 will populate every field with real data.
     return QueryResponse(
         answer=(
-            f"[Day 1 Stub] Received question as **{x_user_id}**: "
+            f"[Day 1 Stub] Received question as **{display_name}** ({role_name}): "
             f"\"{request.question}\"\n\n"
             f"Generated SQL:\n```sql\n{generated_sql}\n```\n\n"
             f"Full pipeline (RBAC filtering, SQL execution, result explanation) "
@@ -188,7 +190,7 @@ async def ask_question(
         was_modified=False,
         modification_explanation="",
         tables_accessed=[],
-        role_name=x_user_id.replace("demo_", ""),
+        role_name=role_name,
         access_scope="stub",
         warnings=[],
         row_count=0,

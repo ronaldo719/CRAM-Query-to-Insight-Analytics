@@ -1,32 +1,42 @@
-import { useState, useEffect } from "react";
-
-/*
- * Query-to-Insight Frontend — Day 1 Scaffold
- *
- * This single component proves the full end-to-end loop:
- *   1. User selects a role from the dropdown
- *   2. User types a natural language question
- *   3. Frontend sends the question + role header to the FastAPI backend
- *   4. Backend calls Azure OpenAI, generates SQL, and returns a response
- *   5. Frontend displays the answer, generated SQL, and role context
- *
- * On Day 2-3, this will be split into proper components:
- *   - RoleSwitcher, QueryInput, SQLPanel, ResultsTable, VisualizationPanel
- *
- * For now, everything lives here so the team can see the full picture
- * in one file and start iterating.
- */
+import { useState } from "react";
+import { AuthProvider, useAuth } from "./AuthContext";
+import LoginPage from "./LoginPage";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
-/* ── TypeScript-style shapes (using JSDoc for plain JS) ─────────── */
+/*
+ * App — wraps everything in AuthProvider.
+ * AppContent — decides between LoginPage and QueryInterface.
+ * QueryInterface — the main analytics UI (only shown when authenticated).
+ */
 
-interface Role {
-  id: string;
-  label: string;
-  icon: string;
-  description: string;
+export default function App() {
+  return (
+    <AuthProvider>
+      <AppContent />
+    </AuthProvider>
+  );
 }
+
+function AppContent() {
+  const { user, isLoading } = useAuth();
+
+  if (isLoading) {
+    return (
+      <div style={{ textAlign: "center", padding: 80, color: "#64748b" }}>
+        Loading...
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <LoginPage />;
+  }
+
+  return <QueryInterface />;
+}
+
+/* ── Types ──────────────────────────────────────────────────────────── */
 
 interface QueryResult {
   answer: string;
@@ -44,82 +54,66 @@ interface QueryResult {
   visualization: any | null;
 }
 
-/* ── Role icon mapping (using emoji for Day 1, swap for Lucide on Day 3) ── */
-const ROLE_ICONS: Record<string, string> = {
-  stethoscope: "🩺",
-  "heart-pulse": "💉",
-  receipt: "💰",
-  microscope: "🔬",
-  shield: "🔑",
-};
+/* ── Starter questions per role ─────────────────────────────────────── */
 
-/* ── Starter questions for each role ─────────────────────────────── */
 const STARTER_QUESTIONS: Record<string, string[]> = {
-  demo_doctor: [
+  physician: [
     "Show me my patients diagnosed with diabetes",
     "What medications are prescribed to my patients?",
     "How many encounters did I have this year?",
   ],
-  demo_nurse: [
-    "List all patients in my department with active conditions",
+  nurse: [
+    "List patients in my department with active conditions",
     "What immunizations are overdue for department patients?",
     "Show me recent vital signs for department patients",
   ],
-  demo_billing: [
+  billing: [
     "What are the total claim costs by payer?",
     "Show me outstanding claims from last month",
     "Which encounters have the highest total costs?",
   ],
-  demo_researcher: [
-    "What is the prevalence of diabetes by age group and gender?",
-    "Compare average healthcare costs across racial demographics",
+  researcher: [
+    "What is the prevalence of diabetes by age group?",
+    "Compare average healthcare costs across demographics",
     "What are the top 10 conditions by patient count?",
   ],
-  demo_admin: [
+  admin: [
     "Show me all patients with diabetes and their medications",
     "What is the total revenue by organization?",
     "How many encounters by type across all providers?",
   ],
 };
 
-export default function App() {
-  /* ── State ──────────────────────────────────────────────────── */
-  const [roles, setRoles] = useState<Role[]>([]);
-  const [currentRole, setCurrentRole] = useState("demo_admin");
+/* ── Main query interface ─────────────────────────────────────────── */
+
+function QueryInterface() {
+  const {
+    user,
+    isAdmin,
+    impersonating,
+    impersonatableUsers,
+    setImpersonating,
+    authFetch,
+    logout,
+  } = useAuth();
+
   const [question, setQuestion] = useState("");
   const [result, setResult] = useState<QueryResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [backendStatus, setBackendStatus] = useState<
-    "checking" | "online" | "offline"
-  >("checking");
 
-  /* ── On mount: check backend health + load roles ────────────── */
-  useEffect(() => {
-    // Health check
-    fetch(`${API_URL}/health`)
-      .then((res) => res.json())
-      .then(() => setBackendStatus("online"))
-      .catch(() => setBackendStatus("offline"));
+  // The active role is either the impersonated user's role or the logged-in user's role
+  const activeRole = impersonating
+    ? impersonatableUsers.find((u) => u.external_id === impersonating)?.role_name
+    : user?.role_name;
 
-    // Load roles for the dropdown
-    fetch(`${API_URL}/api/query/roles`)
-      .then((res) => res.json())
-      .then((data) => setRoles(data.roles))
-      .catch(() => {
-        // Fallback roles if backend is down
-        setRoles([
-          {
-            id: "demo_admin",
-            label: "System Admin",
-            icon: "shield",
-            description: "Full access",
-          },
-        ]);
-      });
-  }, []);
+  const activeDisplayName = impersonating
+    ? impersonatableUsers.find((u) => u.external_id === impersonating)?.display_name
+    : user?.display_name;
 
-  /* ── Submit question to backend ─────────────────────────────── */
+  const starters = STARTER_QUESTIONS[activeRole || "admin"] || [];
+
+  /* ── Submit query ──────────────────────────────────────────── */
   const handleSubmit = async (q?: string) => {
     const queryText = q || question;
     if (!queryText.trim()) return;
@@ -129,17 +123,15 @@ export default function App() {
     setResult(null);
 
     try {
-      const response = await fetch(`${API_URL}/api/query/ask`, {
+      const response = await authFetch(`${API_URL}/api/query/ask`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-User-Id": currentRole,
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question: queryText }),
       });
 
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${response.status}`);
       }
 
       const data: QueryResult = await response.json();
@@ -151,72 +143,68 @@ export default function App() {
     }
   };
 
-  const selectedRole = roles.find((r) => r.id === currentRole);
-  const starters = STARTER_QUESTIONS[currentRole] || [];
-
-  /* ── Render ─────────────────────────────────────────────────── */
   return (
     <div style={styles.container}>
-      {/* ── Header ────────────────────────────────────────────── */}
+      {/* ── Header with user info + logout ─────────────────────── */}
       <header style={styles.header}>
-        <h1 style={styles.title}>Query-to-Insight</h1>
-        <p style={styles.subtitle}>
-          Healthcare Analytics Engine — Microsoft Innovation Challenge
-        </p>
-        <div style={styles.statusRow}>
-          <span
-            style={{
-              ...styles.statusDot,
-              backgroundColor:
-                backendStatus === "online"
-                  ? "#22c55e"
-                  : backendStatus === "offline"
-                    ? "#ef4444"
-                    : "#eab308",
-            }}
-          />
-          <span style={styles.statusText}>
-            Backend:{" "}
-            {backendStatus === "checking"
-              ? "connecting..."
-              : backendStatus === "online"
-                ? "online"
-                : "offline — start with: uvicorn app.main:app --reload"}
-          </span>
+        <div>
+          <h1 style={styles.title}>Query-to-Insight</h1>
+          <p style={styles.subtitle}>Healthcare Analytics Engine</p>
+        </div>
+        <div style={styles.userSection}>
+          <div style={styles.userInfo}>
+            <div style={styles.userName}>{user?.display_name}</div>
+            <div style={styles.userRole}>{user?.role_name}</div>
+          </div>
+          <button onClick={logout} style={styles.logoutButton}>
+            Sign out
+          </button>
         </div>
       </header>
 
-      {/* ── Role Switcher ─────────────────────────────────────── */}
-      <div style={styles.roleSection}>
-        <label style={styles.roleLabel}>Viewing as:</label>
-        <select
-          value={currentRole}
-          onChange={(e) => {
-            setCurrentRole(e.target.value);
-            setResult(null);
-          }}
-          style={styles.roleSelect}
-        >
-          {roles.map((role) => (
-            <option key={role.id} value={role.id}>
-              {ROLE_ICONS[role.icon] || "👤"} {role.label}
+      {/* ── Admin impersonation panel ──────────────────────────── */}
+      {isAdmin && impersonatableUsers.length > 0 && (
+        <div style={styles.impersonationPanel}>
+          <label style={styles.impLabel}>
+            Viewing as:
+          </label>
+          <select
+            value={impersonating || ""}
+            onChange={(e) =>
+              setImpersonating(e.target.value || null)
+            }
+            style={styles.impSelect}
+          >
+            <option value="">
+              Myself (Admin — full access)
             </option>
-          ))}
-        </select>
-        {selectedRole && (
-          <div style={styles.roleBadge}>
-            <span style={styles.roleBadgeIcon}>
-              {ROLE_ICONS[selectedRole.icon] || "👤"}
-            </span>
-            <div>
-              <div style={styles.roleBadgeName}>{selectedRole.label}</div>
-              <div style={styles.roleBadgeDesc}>{selectedRole.description}</div>
+            {impersonatableUsers
+              .filter((u) => u.external_id !== user?.external_id)
+              .map((u) => (
+                <option key={u.external_id} value={u.external_id}>
+                  {u.display_name} — {u.role_name}
+                </option>
+              ))}
+          </select>
+          {impersonating && (
+            <div style={styles.impBadge}>
+              Impersonating {activeDisplayName} ({activeRole})
             </div>
-          </div>
-        )}
-      </div>
+          )}
+        </div>
+      )}
 
-      {/* ── Starter Questions ─────────────────────────────────── */}
+      {/* ── Active role badge (non-admin users) ──────────────── */}
+      {!isAdmin && (
+        <div style={styles.roleBadge}>
+          <div style={styles.roleBadgeName}>{user?.display_name}</div>
+          <div style={styles.roleBadgeDesc}>
+            Role: {user?.role_name} — {user?.row_scope}
+          </div>
+        </div>
+      )}
+
+      {/* ── Starter questions ──────────────────────────────────── */}
       {!result && starters.length > 0 && (
         <div style={styles.startersSection}>
           <p style={styles.startersLabel}>Try asking:</p>
@@ -237,7 +225,7 @@ export default function App() {
         </div>
       )}
 
-      {/* ── Query Input ───────────────────────────────────────── */}
+      {/* ── Query input ─────────────────────────────────────────── */}
       <div style={styles.inputSection}>
         <textarea
           value={question}
@@ -264,40 +252,35 @@ export default function App() {
         </button>
       </div>
 
-      {/* ── Error Display ─────────────────────────────────────── */}
+      {/* ── Error ─────────────────────────────────────────────────── */}
       {error && (
         <div style={styles.errorBox}>
           <strong>Error:</strong> {error}
         </div>
       )}
 
-      {/* ── Results ───────────────────────────────────────────── */}
+      {/* ── Results ───────────────────────────────────────────────── */}
       {result && (
         <div style={styles.resultsSection}>
-          {/* Answer panel */}
           <div style={styles.answerPanel}>
             <h3 style={styles.panelTitle}>Answer</h3>
             <div style={styles.answerText}>
               {result.answer.split("\n").map((line, i) => (
-                <p key={i} style={{ margin: "4px 0" }}>
-                  {line}
-                </p>
+                <p key={i} style={{ margin: "4px 0" }}>{line}</p>
               ))}
             </div>
             <div style={styles.metaRow}>
-              <span style={styles.metaTag}>
-                Role: {result.role_name}
-              </span>
-              <span style={styles.metaTag}>
-                Scope: {result.access_scope}
-              </span>
-              <span style={styles.metaTag}>
-                {result.execution_time_ms}ms
-              </span>
+              <span style={styles.metaTag}>Role: {result.role_name}</span>
+              <span style={styles.metaTag}>Scope: {result.access_scope}</span>
+              <span style={styles.metaTag}>{result.execution_time_ms}ms</span>
+              {impersonating && (
+                <span style={{ ...styles.metaTag, background: "#fef3c7", color: "#92400e" }}>
+                  Impersonated
+                </span>
+              )}
             </div>
           </div>
 
-          {/* SQL Transparency panel (Responsible AI) */}
           <div style={styles.sqlPanel}>
             <h3 style={styles.panelTitle}>
               Generated SQL
@@ -306,27 +289,22 @@ export default function App() {
             <pre style={styles.sqlCode}>{result.generated_sql}</pre>
             {result.was_modified && (
               <div style={styles.modifiedNotice}>
-                ⚠️ Query was modified for access control:{" "}
-                {result.modification_explanation}
+                Query was modified for access control: {result.modification_explanation}
               </div>
             )}
           </div>
 
-          {/* Warnings / Access denials */}
           {result.warnings.length > 0 && (
             <div style={styles.warningsPanel}>
-              <h3 style={styles.panelTitle}>Access Notices</h3>
+              <h3 style={styles.panelTitle}>Access notices</h3>
               {result.warnings.map((w, i) => (
-                <div key={i} style={styles.warningItem}>
-                  🔒 {w}
-                </div>
+                <div key={i} style={styles.warningItem}>{w}</div>
               ))}
             </div>
           )}
         </div>
       )}
 
-      {/* ── Footer ────────────────────────────────────────────── */}
       <footer style={styles.footer}>
         <em>
           AI-generated analysis of synthetic data (Synthea). Results should
@@ -337,77 +315,76 @@ export default function App() {
   );
 }
 
-/* ── Inline styles (swap for Tailwind or CSS modules on Day 3) ──── */
+/* ── Styles ─────────────────────────────────────────────────────────── */
+
 const styles: Record<string, React.CSSProperties> = {
   container: {
     maxWidth: 860,
     margin: "0 auto",
     padding: "24px 20px",
-    fontFamily:
-      '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
     color: "#1a1a2e",
   },
-  header: { marginBottom: 28 },
-  title: { fontSize: 28, fontWeight: 700, margin: 0 },
-  subtitle: { fontSize: 14, color: "#64748b", marginTop: 4 },
-  statusRow: {
+  header: {
     display: "flex",
-    alignItems: "center",
-    gap: 8,
-    marginTop: 8,
-  },
-  statusDot: {
-    width: 8,
-    height: 8,
-    borderRadius: "50%",
-    display: "inline-block",
-  },
-  statusText: { fontSize: 13, color: "#64748b" },
-
-  roleSection: {
+    justifyContent: "space-between",
+    alignItems: "flex-start",
     marginBottom: 20,
-    padding: 16,
-    background: "#f8fafc",
-    borderRadius: 10,
-    border: "1px solid #e2e8f0",
   },
-  roleLabel: {
+  title: { fontSize: 26, fontWeight: 700, margin: 0 },
+  subtitle: { fontSize: 13, color: "#64748b", marginTop: 2 },
+  userSection: { display: "flex", alignItems: "center", gap: 12 },
+  userInfo: { textAlign: "right" as const },
+  userName: { fontSize: 14, fontWeight: 600 },
+  userRole: { fontSize: 12, color: "#64748b" },
+  logoutButton: {
+    padding: "6px 14px",
     fontSize: 13,
-    fontWeight: 600,
+    background: "#f1f5f9",
+    border: "1px solid #e2e8f0",
+    borderRadius: 6,
+    cursor: "pointer",
     color: "#475569",
-    display: "block",
-    marginBottom: 8,
   },
-  roleSelect: {
+
+  impersonationPanel: {
+    marginBottom: 16,
+    padding: 14,
+    background: "#fffbeb",
+    borderRadius: 10,
+    border: "1px solid #fde68a",
+  },
+  impLabel: { fontSize: 13, fontWeight: 600, color: "#92400e", marginRight: 8 },
+  impSelect: {
     width: "100%",
-    padding: "10px 12px",
-    fontSize: 15,
-    borderRadius: 8,
-    border: "1px solid #cbd5e1",
+    padding: "8px 10px",
+    fontSize: 14,
+    borderRadius: 6,
+    border: "1px solid #fde68a",
     background: "#fff",
     cursor: "pointer",
-    marginBottom: 10,
+    marginTop: 6,
   },
+  impBadge: {
+    marginTop: 8,
+    fontSize: 12,
+    color: "#92400e",
+    fontWeight: 500,
+  },
+
   roleBadge: {
-    display: "flex",
-    alignItems: "center",
-    gap: 10,
-    padding: "8px 12px",
+    marginBottom: 16,
+    padding: "10px 14px",
     background: "#eff6ff",
     borderRadius: 8,
     border: "1px solid #bfdbfe",
   },
-  roleBadgeIcon: { fontSize: 22 },
   roleBadgeName: { fontWeight: 600, fontSize: 14 },
-  roleBadgeDesc: { fontSize: 12, color: "#64748b" },
+  roleBadgeDesc: { fontSize: 12, color: "#64748b", marginTop: 2 },
 
   startersSection: { marginBottom: 20 },
   startersLabel: { fontSize: 13, color: "#64748b", marginBottom: 8 },
-  startersGrid: {
-    display: "flex",
-    flexDirection: "column",
-    gap: 6,
-  },
+  startersGrid: { display: "flex", flexDirection: "column" as const, gap: 6 },
   starterButton: {
     padding: "10px 14px",
     fontSize: 14,
@@ -417,7 +394,6 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: "pointer",
     textAlign: "left" as const,
     color: "#334155",
-    transition: "border-color 0.15s",
   },
 
   inputSection: {
@@ -458,11 +434,7 @@ const styles: Record<string, React.CSSProperties> = {
     marginBottom: 20,
   },
 
-  resultsSection: {
-    display: "flex",
-    flexDirection: "column",
-    gap: 16,
-  },
+  resultsSection: { display: "flex", flexDirection: "column" as const, gap: 16 },
   answerPanel: {
     padding: 18,
     background: "#f0fdf4",
@@ -480,12 +452,7 @@ const styles: Record<string, React.CSSProperties> = {
     gap: 8,
   },
   answerText: { fontSize: 15, lineHeight: 1.6 },
-  metaRow: {
-    display: "flex",
-    gap: 8,
-    marginTop: 12,
-    flexWrap: "wrap" as const,
-  },
+  metaRow: { display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" as const },
   metaTag: {
     fontSize: 12,
     padding: "3px 10px",
@@ -534,11 +501,7 @@ const styles: Record<string, React.CSSProperties> = {
     border: "1px solid #fecaca",
     borderRadius: 10,
   },
-  warningItem: {
-    fontSize: 14,
-    padding: "6px 0",
-    color: "#991b1b",
-  },
+  warningItem: { fontSize: 14, padding: "6px 0", color: "#991b1b" },
 
   footer: {
     marginTop: 32,
