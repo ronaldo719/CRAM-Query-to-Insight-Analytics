@@ -5,54 +5,204 @@ An agentic analytics engineer that converts natural language questions into vali
 
 ---
 
-## Day 1 Checkpoint ✅
+## Day 2 Checkpoint ✅
 
 ### What's Built
 
-**Backend (FastAPI)**
-- `app/main.py` — FastAPI entry point with CORS, health check, root endpoint
-- `app/config.py` — Centralized settings + Azure OpenAI client factory (`lru_cache` singleton)
-- `app/routers/query.py` — `/api/query/ask` and `/api/query/roles` endpoints
+**Full NL-to-SQL Pipeline** — A single `POST /api/query/ask` call runs the complete pipeline:
+
+```
+JWT auth → RBAC context → Content Safety → SQL generation →
+sqlglot validation → RBAC rewriting → execution → explanation → audit
+```
+
+**Backend Services (FastAPI)**
+- `app/services/rbac_service.py` — Loads complete role context from DB (`app_users → app_roles → app_role_column_access`)
+- `app/services/content_safety_service.py` — Azure AI Content Safety screening (input + output) with graceful degradation
+- `app/services/query_engine.py` — Pipeline orchestrator: 9-step execution with 3-retry self-correction loop
+- `app/services/sql_validator.py` — 8-layer SQL validation using sqlglot AST parsing
+- `app/services/sql_rewriter.py` — Defense-in-depth row-level filter injection via subquery wrapping
+- `app/routers/query.py` — Updated to delegate to `QueryEngine` (replaces Day 1 stub)
 
 **Frontend (React + Vite)**
-- `src/App.tsx` — Single-component Day 1 scaffold: role switcher, starter questions, query input, results panel with SQL transparency section
+- `src/App.tsx` — Full query UI with results table, SQL transparency panel, visualization
+- `src/AuthContext.tsx` — Session management, login/logout, `authFetch` wrapper, impersonation
 
 **Infrastructure**
-- Azure SQL Database (`synthea-health`) — 18 Synthea clinical/financial tables loaded via `bcp`
-- Azure OpenAI (`gpt-4o-mini`) — Connected and returning SQL generation responses
-- `.gitignore` — Protects `.env`, `data/`, and `backend/scripts/` from being committed
+- Azure SQL Database (`synthea-health`) — 18 Synthea clinical/financial tables + RBAC tables + audit log
+- Azure OpenAI (`gpt-4o-mini`) — SQL generation, result explanation, and visualization spec generation
+- Azure AI Content Safety — Input/output screening (degrades gracefully when not configured)
+- Read-only DB user (`q2i_readonly`) — Defense-in-depth: even if SQL contains mutations, the database rejects them
 
 ---
 
-### Verified Endpoints
+## Query Pipeline — How It Works
 
-| Endpoint | Method | Status |
-|---|---|---|
-| `/health` | GET | ✅ `{"status":"healthy","service":"query-to-insight-backend","version":"1.0.0"}` |
-| `/api/query/roles` | GET | ✅ Returns 5 demo roles |
-| `/api/query/ask` | POST | ✅ Calls Azure OpenAI, returns generated SQL + role context |
+```
+                    ┌─────────────────────────────────────────────┐
+                    │            POST /api/query/ask              │
+                    │         { question, history? }              │
+                    └──────────────────┬──────────────────────────┘
+                                       │
+                    ┌──────────────────▼──────────────────────────┐
+                    │  Step 1: Load RBAC Context                  │
+                    │  rbac_service.get_role_context(external_id) │
+                    │  → app_users → app_roles → column_access    │
+                    └──────────────────┬──────────────────────────┘
+                                       │
+                    ┌──────────────────▼──────────────────────────┐
+                    │  Step 2: Content Safety Screening           │
+                    │  Screen user's question for harmful content │
+                    │  → Block or allow                           │
+                    └──────────────────┬──────────────────────────┘
+                                       │
+                    ┌──────────────────▼──────────────────────────┐
+                    │  Step 3: Generate SQL (Azure OpenAI)        │
+                    │  System prompt = schema + role constraints   │
+                    │  + few-shot examples + conversation history  │
+                    └──────────────────┬──────────────────────────┘
+                                       │
+                    ┌──────────────────▼──────────────────────────┐
+                    │  Step 4: Validate SQL (sqlglot)             │
+                    │  8 layers: parse → no mutations → no system │
+                    │  tables → table access → column access →    │
+                    │  aggregate enforcement → TOP injection →    │
+                    │  row scope check                            │
+                    │  ↻ If invalid, retry up to 3× with error   │
+                    └──────────────────┬──────────────────────────┘
+                                       │
+                    ┌──────────────────▼──────────────────────────┐
+                    │  Step 5: Rewrite SQL with RBAC Filters      │
+                    │  Wrap in subquery + EXISTS filter for        │
+                    │  provider/org/k-anonymity enforcement       │
+                    └──────────────────┬──────────────────────────┘
+                                       │
+                    ┌──────────────────▼──────────────────────────┐
+                    │  Step 6: Execute SQL (read-only connection)  │
+                    │  q2i_readonly user, 30s timeout, 500 row cap│
+                    └──────────────────┬──────────────────────────┘
+                                       │
+                    ┌──────────────────▼──────────────────────────┐
+                    │  Step 7: Generate Explanation (Azure OpenAI) │
+                    │  Plain-language summary of results           │
+                    └──────────────────┬──────────────────────────┘
+                                       │
+                    ┌──────────────────▼──────────────────────────┐
+                    │  Step 8: Screen Output (Content Safety)      │
+                    │  Catch harmful content in LLM explanations   │
+                    └──────────────────┬──────────────────────────┘
+                                       │
+                    ┌──────────────────▼──────────────────────────┐
+                    │  Step 9: Generate Visualization Spec         │
+                    │  LLM recommends chart type + formats data    │
+                    │  for Recharts (bar/line/pie/scatter/table)   │
+                    └──────────────────┬──────────────────────────┘
+                                       │
+                    ┌──────────────────▼──────────────────────────┐
+                    │  Audit Log: Write everything to              │
+                    │  dbo.app_query_audit_log                     │
+                    └─────────────────────────────────────────────┘
+```
 
-### Demo Roles
+---
 
-| ID | Name | Access |
-|---|---|---|
-| `demo_doctor` | Dr. Sarah Chen | Physician — own patients, full clinical |
-| `demo_nurse` | James Rodriguez, RN | Department patients, clinical only |
-| `demo_billing` | Maria Thompson | All patients, financial only |
-| `demo_researcher` | Dr. Alex Kumar | Aggregate only, no PII |
-| `demo_admin` | System Admin | Full access |
+## SQL Validation — 8 Layers
+
+The `SQLValidator` parses every LLM-generated query with **sqlglot** and enforces:
+
+| Layer | Check | Action |
+|-------|-------|--------|
+| 1 | **Parse** | Reject unparseable SQL |
+| 2 | **No mutations** | Block INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, GRANT |
+| 3 | **No system tables** | Block `sys.*`, `information_schema.*`, `app_users`, `app_roles`, etc. |
+| 4 | **Table-level access** | Only allow tables in the role's `allowed_tables` list |
+| 5 | **Column-level access** | Block columns in the role's deny list (e.g., PII columns) |
+| 6 | **Aggregate enforcement** | Researcher role must use GROUP BY + aggregate functions |
+| 7 | **TOP injection** | Add `TOP 500` if missing (handles `SELECT DISTINCT` correctly) |
+| 8 | **Row scope check** | Warn if provider/org filter is missing (rewriter will inject it) |
+
+---
+
+## SQL Rewriter — Defense in Depth
+
+Even if the LLM correctly includes RBAC filters, the rewriter **unconditionally** wraps the query with access controls. This prevents prompt injection from bypassing row-level security.
+
+**Strategy:** Wrap the LLM's SQL in a subquery and add an `EXISTS` filter:
+
+```sql
+-- RBAC: filtered to provider e5a3f7ff-...
+SELECT rbac_outer.* FROM (
+    <original LLM query>
+) rbac_outer
+WHERE EXISTS (
+    SELECT 1 FROM dbo.encounters rbac_enc
+    WHERE rbac_enc.PATIENT = rbac_outer.Id
+      AND rbac_enc.PROVIDER = 'e5a3f7ff-...'
+)
+```
+
+| Scope | Filter |
+|-------|--------|
+| `own_patients` | `encounters.PROVIDER = '{provider_id}'` |
+| `department` | `encounters.ORGANIZATION = '{organization_id}'` |
+| `aggregate_only` | Injects `HAVING COUNT(*) >= 5` for k-anonymity |
+| `all` | No rewriting needed |
+
+The rewriter auto-detects the patient column name (`Id` vs `PATIENT`) from the inner query's SELECT clause.
+
+---
+
+## Content Safety Integration
+
+Azure AI Content Safety screens text at **two points** in the pipeline:
+
+1. **Before the LLM** — Block harmful user questions (prompt injection, hate, violence, etc.)
+2. **After the LLM** — Catch harmful content in generated explanations
+
+**Graceful degradation:** If Content Safety is not configured (missing endpoint/key), the service logs a warning and allows requests through. This prevents breakage during local development.
+
+| Category | Severity 0 | Severity 2+ |
+|----------|------------|-------------|
+| Hate | Safe | Blocked |
+| Violence | Safe | Blocked |
+| Sexual | Safe | Blocked |
+| Self-harm | Safe | Blocked |
+
+---
+
+## Verified Test Scenarios
+
+| # | Role | Query | Expected | Result |
+|---|------|-------|----------|--------|
+| 1 | **Admin** | "How many patients by gender?" | Full results + bar chart | ✅ 180 F, 159 M returned |
+| 2 | **Doctor** | "Show me my patients with diabetes" | Own patients only, CTE wrapper | ✅ 3 patients, provider filter in `executed_sql` |
+| 3 | **Billing** | "Patients with diabetes and medications" | Denied — clinical tables | ✅ `conditions` and `medications` blocked |
+| 4a | **Researcher** | "Count conditions by type" | Aggregate with k-anonymity | ✅ 151 rows, `HAVING COUNT(*) >= 5` |
+| 4b | **Researcher** | "Show me patient names" | Denied — individual records | ✅ LLM refused, aggregate-only constraint |
+| 5 | **Nurse** | "What are encounter costs?" | Denied — cost columns | ✅ Claims table not in allowed tables |
+
+---
+
+## API Endpoints
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/health` | No | Health check |
+| `POST` | `/api/auth/login` | No | Authenticate, set `q2i_token` cookie |
+| `POST` | `/api/auth/logout` | No | Clear cookie |
+| `GET` | `/api/auth/me` | Cookie | Current user (or impersonated user) |
+| `POST` | `/api/auth/register` | Admin | Create new user |
+| `GET` | `/api/auth/users` | Admin | List users for impersonation dropdown |
+| `POST` | `/api/query/ask` | Cookie | **Full NL-to-SQL pipeline** |
+| `GET` | `/api/query/roles` | No | Demo roles for role switcher |
 
 ---
 
 ## Authentication System
 
-The app uses a stateless JWT-based authentication system. Tokens are stored in **httpOnly cookies** — they are never exposed to JavaScript, which eliminates the XSS token-theft risk that comes with `localStorage`.
+The app uses stateless JWT-based authentication. Tokens are stored in **httpOnly cookies** — never exposed to JavaScript.
 
----
-
-### How It Works — End to End
-
-#### 1. Login
+### Login Flow
 
 ```
 Browser                         FastAPI Backend                    Azure SQL
@@ -67,268 +217,89 @@ Browser                         FastAPI Backend                    Azure SQL
   │   HttpOnly; Secure; SameSite=Lax  │
 ```
 
-The backend calls `auth_service.authenticate_user()`, which:
-1. Queries `dbo.app_users` joined with `dbo.app_roles` for the given username
-2. Verifies the submitted password against the stored **bcrypt hash** (the plain-text password is never stored or logged)
-3. On success, updates `last_login` in the database
-4. Returns the user dict to the router
-
-The router then calls `auth_service.create_access_token()` and sets the resulting JWT as a cookie with:
-
-| Cookie attribute | Value | Why |
-|---|---|---|
-| `HttpOnly` | `true` | Blocks JavaScript from reading the token |
-| `Secure` | `true` | Only sent over HTTPS |
-| `SameSite` | `Lax` | Prevents CSRF on cross-site navigations |
-| `max_age` | 28800 (8 h) | Matches token expiry |
-| `path` | `/` | Sent on all API paths |
-
-The **login response body** contains only the user object — never the raw token.
-
----
-
-#### 2. Authenticated Requests
-
-After login the browser automatically attaches `q2i_token` to every same-origin request (no JavaScript involvement). The frontend uses `credentials: "include"` on all `fetch` calls to ensure this works in cross-origin development (frontend on `:5173`, backend on `:8000`).
-
-```
-Browser                         FastAPI Backend
-  │                                    │
-  │── POST /api/query/ask ──────────> │
-  │   Cookie: q2i_token=<jwt>         │
-  │   X-Impersonate: demo_nurse       │  (optional, admin only)
-  │                                    │
-  │                        get_current_user() dependency:
-  │                          1. Read q2i_token from Cookie
-  │                          2. decode_access_token(token)
-  │                          3. If X-Impersonate set and caller is admin:
-  │                               load impersonated user from DB
-  │                          4. Return user dict to route handler
-  │                                    │
-  │<─ 200 { answer, generated_sql… } ─│
-```
-
-Every protected route injects `user: dict = Depends(get_current_user)`. FastAPI calls `get_current_user()` automatically before the route handler runs.
-
----
-
-#### 3. Session Validation on Page Load
-
-On mount, `AuthProvider` calls `GET /api/auth/me` with `credentials: "include"`. If the cookie is present and the JWT is valid, the backend returns the user profile and the frontend hydrates the session. If the cookie is absent or expired, the backend returns `401` and the user is shown the login page.
-
-```typescript
-// AuthContext.tsx — runs once on app load
-useEffect(() => {
-  fetch(`${API_URL}/api/auth/me`, { credentials: "include" })
-    .then(res => { if (!res.ok) throw new Error(); return res.json(); })
-    .then(data => setUser(data))
-    .catch(() => setUser(null))
-    .finally(() => setIsLoading(false));
-}, []);
-```
-
----
-
-#### 4. Logout
-
-```
-Browser                         FastAPI Backend
-  │── POST /api/auth/logout ───────> │
-  │   Cookie: q2i_token=<jwt>        │
-  │                                    │   response.delete_cookie("q2i_token")
-  │<─ 200 { message: "Logged out" } ─│
-  │   Set-Cookie: q2i_token=; Max-Age=0
-```
-
-The backend deletes the cookie server-side. The frontend then clears its `user` state locally.
-
----
-
 ### JWT Token Structure
 
-Tokens are signed with **HS256** using the `JWT_SECRET_KEY` environment variable (no fallback — the app refuses to start without it).
-
-**Payload claims:**
+Signed with **HS256** using `JWT_SECRET_KEY` (no fallback — app refuses to start without it).
 
 | Claim | Example | Description |
-|---|---|---|
-| `sub` | `"demo_doctor"` | User's `external_id` (primary identity) |
+|-------|---------|-------------|
+| `sub` | `"demo_doctor"` | User's `external_id` |
 | `user_id` | `1` | Database primary key |
-| `display_name` | `"Dr. Sarah Chen"` | Human-readable name for the UI |
-| `role` | `"physician"` | Role name used for RBAC decisions |
-| `exp` | Unix timestamp | Expiry (8 hours from issue) |
-
-The payload is **intentionally minimal** — only what every request needs. The full RBAC context (row scopes, column restrictions, provider ID) is loaded from the database only when a query is actually executed.
-
----
-
-### Role-Based Access Control (RBAC)
-
-The five demo roles map to different data access scopes:
-
-| Role (`external_id`) | `role_name` | `row_scope` | Access |
-|---|---|---|---|
-| `demo_doctor` | `physician` | own patients | Full clinical data, own patients only |
-| `demo_nurse` | `nurse` | department | Clinical data, no billing |
-| `demo_billing` | `billing` | all | Financial data only, no clinical |
-| `demo_researcher` | `researcher` | aggregate | Aggregate queries only, no PII |
-| `demo_admin` | `admin` | all | Full access + impersonation |
-
-The `role_name` and `row_scope` come from `dbo.app_roles`, joined at login. They are embedded in the JWT so the RBAC pipeline can start immediately on Day 2 without an extra database round-trip per request.
-
----
+| `display_name` | `"Dr. Sarah Chen"` | For UI display |
+| `role` | `"physician"` | Role name for RBAC |
+| `exp` | Unix timestamp | 8-hour expiry |
 
 ### Admin Impersonation
 
-The admin user can act as any other user without logging out. This powers the demo role-switcher in the UI.
-
-**How it works:**
-
-1. Admin is logged in normally (cookie contains admin's JWT)
-2. Frontend sets `X-Impersonate: demo_nurse` header via `authFetch`
-3. `get_current_user()` dependency detects the header:
-   - Verifies the cookie JWT is valid and belongs to an admin
-   - Loads the impersonated user's full profile from the database
-   - Sets `impersonated_by` on the returned user dict
-4. The route handler sees the impersonated user — not the admin
-
-Non-admin users sending `X-Impersonate` receive a `403 Forbidden`.
-
-```python
-# dependencies/auth.py
-if x_impersonate and x_impersonate != payload.get("sub"):
-    if payload.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Only admins can impersonate.")
-    impersonated = _load_user_from_db(x_impersonate)
-    impersonated["impersonated_by"] = payload.get("sub")
-    return impersonated
-```
+Admin can act as any user via `X-Impersonate` header. The auth dependency loads the impersonated user's profile from DB and sets `impersonated_by` for audit tracking.
 
 ---
 
-### Password Hashing
+## Role-Based Access Control (RBAC)
 
-Passwords are hashed with **bcrypt** via `passlib`:
+| Role | `row_scope` | Allowed Tables | Denied Columns | PII |
+|------|-------------|----------------|----------------|-----|
+| **Physician** | own_patients | All clinical + financial | — | ✅ |
+| **Nurse** | department | Clinical tables only | Cost columns | ❌ |
+| **Billing** | all | Financial + patients + encounters | Clinical tables blocked | ❌ |
+| **Researcher** | aggregate_only | All clinical + financial | PII columns | ❌ |
+| **Admin** | all | All tables | — | ✅ |
 
-```python
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-```
-
-- bcrypt is slow by design — each hash takes ~100ms, making brute-force impractical
-- Salt is generated automatically per-hash — no two hashes for the same password are identical
-- Plain-text passwords are never stored, logged, or returned by any endpoint
-
-Demo passwords are seeded by `backend/scripts/migrate_auth.py`, which runs the bcrypt hash at migration time.
-
----
-
-### Backend File Reference
-
-| File | Purpose |
-|---|---|
-| `backend/app/services/auth_service.py` | Password verification, JWT creation/decoding, `authenticate_user`, `create_user` |
-| `backend/app/dependencies/auth.py` | `get_current_user` (cookie → JWT → user dict), `require_admin`, `_load_user_from_db` |
-| `backend/app/routers/auth.py` | `POST /login`, `POST /logout`, `GET /me`, `POST /register`, `GET /users` |
-| `backend/scripts/migrate_auth.py` | One-time migration: adds `password_hash` column, seeds bcrypt hashes for demo users |
-
-### Frontend File Reference
-
-| File | Purpose |
-|---|---|
-| `frontend/src/AuthContext.tsx` | React context: session hydration, `login`, `logout`, `authFetch` wrapper, impersonation state |
-| `frontend/src/LoginPage.tsx` | Login form + quick-login buttons for demo roles |
+The `RoleContext` object flows through every pipeline step:
+1. **System prompt** — `to_prompt_constraints()` generates LLM-readable access rules
+2. **SQL validator** — Checks table/column access against allowed lists
+3. **SQL rewriter** — Injects mandatory WHERE/EXISTS filters
+4. **Audit log** — Records role, scope, and impersonation context
 
 ---
 
-### Auth API Endpoints
-
-| Method | Path | Auth required | Description |
-|---|---|---|---|
-| `POST` | `/api/auth/login` | No | Validate credentials, set `q2i_token` cookie |
-| `POST` | `/api/auth/logout` | No | Clear `q2i_token` cookie |
-| `GET` | `/api/auth/me` | Cookie | Return current user (or impersonated user) |
-| `POST` | `/api/auth/register` | Cookie + admin | Create a new user account |
-| `GET` | `/api/auth/users` | Cookie + admin | List all users for the impersonation dropdown |
-
----
-
-### Setup — First-Time Auth Migration
-
-After running `setup_database.py --phase seed-users` to create the user rows, run the auth migration to add password hashes:
-
-```bash
-cd backend
-source venv/bin/activate
-python scripts/migrate_auth.py
-```
-
-This adds the `password_hash` column to `dbo.app_users` if it doesn't exist, then bcrypt-hashes and stores the demo passwords.
-
-**Required environment variable** — must be set before starting the backend:
-
-```bash
-JWT_SECRET_KEY=<64-char random hex>   # generate: python3 -c "import secrets; print(secrets.token_hex(32))"
-```
-
-The app will raise `RuntimeError: JWT_SECRET_KEY environment variable is not set` and refuse to start if this is missing.
-
----
-
-### Security Decisions
-
-| Decision | Rationale |
-|---|---|
-| httpOnly cookie (not `localStorage`) | JavaScript cannot read the token — XSS cannot steal sessions |
-| `Secure` cookie flag | Token only transmitted over HTTPS |
-| `SameSite=Lax` | Cookies not sent on cross-site POST requests, mitigating CSRF |
-| No fallback JWT secret | Prevents accidental deployment with a weak default key |
-| bcrypt for password hashing | Industry-standard slow hash; automatic salting |
-| Parameterized SQL queries | All database access uses `?` placeholders — no string interpolation |
-| CORS restricted to explicit methods/headers | Only `GET`, `POST`, `OPTIONS` and required headers are allowed cross-origin |
-
----
-
-### Project Structure
+## Project Structure
 
 ```
 CRAM-Query-to-Insight-Analytics/
 ├── backend/
 │   ├── app/
 │   │   ├── __init__.py
-│   │   ├── main.py              # FastAPI entry point, CORS config
-│   │   ├── config.py            # Settings + OpenAI client factory
+│   │   ├── main.py                       # FastAPI entry point, CORS config
+│   │   ├── config.py                     # Settings + OpenAI client factory
 │   │   ├── dependencies/
-│   │   │   └── auth.py          # get_current_user, require_admin (cookie-based)
+│   │   │   └── auth.py                   # get_current_user, require_admin
 │   │   ├── routers/
 │   │   │   ├── __init__.py
-│   │   │   ├── auth.py          # /api/auth/* endpoints
-│   │   │   └── query.py         # /api/query/ask and /api/query/roles
+│   │   │   ├── auth.py                   # /api/auth/* endpoints
+│   │   │   └── query.py                  # /api/query/ask → QueryEngine
 │   │   └── services/
 │   │       ├── __init__.py
-│   │       └── auth_service.py  # bcrypt hashing, JWT creation/decoding, DB auth
-│   ├── scripts/                 # gitignored — contains credentials
-│   │   └── migrate_auth.py      # Adds password_hash column, seeds demo passwords
+│   │       ├── auth_service.py           # bcrypt hashing, JWT, DB auth
+│   │       ├── rbac_service.py           # RoleContext loader from DB
+│   │       ├── content_safety_service.py # Azure Content Safety screening
+│   │       ├── sql_validator.py          # 8-layer sqlglot validation
+│   │       ├── sql_rewriter.py           # Subquery RBAC filter injection
+│   │       └── query_engine.py           # Pipeline orchestrator (9 steps)
+│   ├── scripts/                          # gitignored — setup/migration
+│   │   ├── setup_database.py
+│   │   └── migrate_auth.py
 │   ├── requirements.txt
 │   └── test_openai.py
 ├── frontend/
 │   ├── src/
-│   │   ├── App.tsx              # Full Day 1 UI scaffold
-│   │   ├── AuthContext.tsx      # Session state, login/logout, authFetch wrapper
-│   │   ├── LoginPage.tsx        # Login form + demo role quick-login buttons
+│   │   ├── App.tsx                       # Query UI + results + visualization
+│   │   ├── AuthContext.tsx               # Session state, authFetch, impersonation
+│   │   ├── LoginPage.tsx                 # Login form + demo quick-login
 │   │   ├── main.jsx
 │   │   └── index.css
 │   ├── tsconfig.json
 │   └── package.json
-├── .env                         # gitignored — actual secrets
+├── .env                                  # gitignored — secrets
 └── .gitignore
 ```
 
 ---
 
-### Local Development
+## Local Development
 
 **Prerequisites**
-- Node.js 20+ (use `nvm use 22`)
+- Node.js 20+ (use `nvm use 20`)
 - Python 3.11+
 - ODBC Driver 18 for SQL Server
 
@@ -344,81 +315,70 @@ uvicorn app.main:app --reload --port 8000
 **Frontend**
 ```bash
 cd frontend
-nvm use 22
+nvm use 20
 npm install
 npm run dev
 # → http://localhost:5173
 ```
 
-**Environment variables** — create `.env` at the repo root and fill in:
+**Environment variables** — create `.env` at the repo root:
 ```
 AZURE_SQL_CONNECTION_STRING=...
+AZURE_SQL_READONLY_CONNECTION_STRING=...
 AZURE_OPENAI_ENDPOINT=...
 AZURE_OPENAI_KEY=...
 AZURE_OPENAI_DEPLOYMENT=gpt-4o-mini
 AZURE_OPENAI_API_VERSION=2024-12-01-preview
+CONTENT_SAFETY_ENDPOINT=...          # optional — degrades gracefully
+CONTENT_SAFETY_KEY=...               # optional — degrades gracefully
 FRONTEND_URL=http://localhost:5173
 JWT_SECRET_KEY=...   # generate: python3 -c "import secrets; print(secrets.token_hex(32))"
 ```
 
----
+### Testing the Pipeline
 
-### Azure Services (6)
-
-- ✅ Azure SQL Database — schema created, data loaded via bcp
-- ✅ Azure OpenAI — gpt-4o-mini deployed, API key working
-- ✅ Key Vault — secrets stored
-- ✅ Content Safety — F0 provisioned
-- ✅ Application Insights — connected to Log Analytics
-- ✅ Log Analytics Workspace
+1. Open Swagger UI at `http://localhost:8000/docs`
+2. `POST /api/auth/login` with `{"username": "demo_admin", "password": "admin123"}`
+3. `POST /api/query/ask` with `{"question": "What are the top 10 most common conditions?"}`
+4. Test RBAC by logging in as different users (e.g., `demo_billing` / `billing123`)
 
 ---
 
-### Day 1 Checklist
+## Security — Defense in Depth
 
-**Backend**
-- ✅ uvicorn runs without errors on port 8000
-- ✅ `/health` returns 200
-- ✅ `/api/query/roles` returns 5 demo roles
-- ✅ `/api/query/ask` calls Azure OpenAI and returns generated SQL
-
-**Frontend**
-- ✅ Vite dev server runs on port 5173
-- ✅ Role switcher dropdown populated from API
-- ✅ Submitting a question shows a response from the backend
-- ✅ "Backend: online" indicator turns green
+| Layer | Protection |
+|-------|-----------|
+| **Layer 1: Authentication** | JWT in httpOnly cookie, bcrypt passwords, no token in response body |
+| **Layer 2: Content Safety** | Azure AI screens input before LLM and output after LLM |
+| **Layer 3: LLM Prompt** | Role constraints injected into system prompt as mandatory rules |
+| **Layer 4: SQL Validation** | sqlglot AST parsing blocks mutations, system tables, denied columns |
+| **Layer 5: SQL Rewriting** | Unconditional subquery wrapping — bypasses prompt injection |
+| **Layer 6: Read-only DB** | `q2i_readonly` user has only `db_datareader` — mutations rejected at DB level |
+| **Layer 7: Audit Logging** | Every query attempt logged with user, role, SQL, timing, safety scores |
 
 ---
 
-### Day 2 — Planned (Core Pipeline)
+## Azure Services (6)
 
-- `app/services/rbac_service.py` — Load user role from Azure SQL RBAC tables
-- `app/services/sql_validator.py` — Parse LLM SQL with `sqlglot`, block unsafe patterns
-- Wire full pipeline: Content Safety → SQL generation → validation → RBAC rewriting → execution → explanation
-- Real query results returned as structured data (rows + column names)
-- Complete the full NL-to-SQL pipeline: system prompt with Synthea schema, few-shot medical examples, sqlglot validation, safe execution with timeouts. Deploy FastAPI to App Service.
-- Configure Key Vault references in App Service, enable Entra ID Easy Auth, set up managed identity. Create monitoring dashboards in Application Insights. Test end-to-end connectivity.
-- Build the query experience UI: input box → loading states → SQL display panel → results table → natural language explanation panel. Implement SSE streaming from backend.
--  Integrate Content Safety into the pipeline (input + output filtering). Implement two-tier caching (in-memory L1 + Redis L2). Begin audit logging schema and write path.
-- RBAC service wiring to live database
-- LLM prompt engineering with Synthea schema + few-shot examples
-- sqlglot SQL validation + SQL rewriter with RBAC WHERE injection
-- Query execution against read-only user + result explanation
+- ✅ Azure SQL Database — Synthea data + RBAC tables + audit log
+- ✅ Azure OpenAI (gpt-4o-mini) — SQL generation, explanation, visualization
+- ✅ Azure AI Content Safety — Input/output screening
+- ✅ Key Vault — Secret storage
+- ✅ Application Insights — Monitoring
+- ✅ Log Analytics Workspace — Centralized logging
 
-### Day 3 — Planned ( Responsible AI + innovation features) 
+---
 
-- Auto-visualization: bar/line/pie chart selection based on query shape
-- Split `App.tsx` into components: `RoleSwitcher`, `QueryInput`, `SQLPanel`, `ResultsTable`, `VisualizationPanel`
-- Replace emoji icons with Lucide React icons
-- Replace inline styles with Tailwind CSS
-- Implement multi-step query decomposition. Add self-correction loop (3 retries with error context). Add conversation memory for follow-up questions.
-- Provision Azure Functions. Build timer-triggered function for scheduled digest generation. Configure Blob Storage for report exports. Set up Cosmos DB for audit logs if time allows.
--  Build auto-visualization engine — LLM returns chart config JSON, React dynamically renders bar/line/pie/scatter charts. Build proactive suggestion display (3 follow-up question chips after each result).
-- Implement green/amber/red sensitivity classification. Build approval workflow (synchronous for demo). Add bias detection alerts for demographic queries. Build audit log viewer page.
-- Content Safety integration (input + output screening)
+## Day 3 — Planned (Responsible AI + Innovation)
+
+- Auto-visualization: bar/line/pie chart rendering with Recharts
+- Split `App.tsx` into components: `QueryInput`, `SQLPanel`, `ResultsTable`, `VisualizationPanel`
+- Tailwind CSS + Lucide React icons
 - Sensitivity classification (green/amber/red)
-- Self-correction loop (3 retries on SQL errors)
-- Conversation memory for follow-up questions
+- Proactive follow-up question suggestions
+- Approval workflow for sensitive queries
+- Audit log viewer page
+
 ---
 
 > AI-generated analysis of synthetic data (Synthea). Results should be verified by qualified professionals.

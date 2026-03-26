@@ -1,37 +1,29 @@
 """
 Query Router — The main API endpoint for natural language queries.
 
-This is the entry point for all user questions. On Day 1, the endpoint is
-stubbed to return a placeholder response so the frontend team can build
-against a real API contract. On Day 2, we'll wire in the full pipeline:
-Content Safety → LLM SQL generation → SQL validation → RBAC rewriting →
-execution → result explanation.
+Now fully wired to the Day 2 pipeline:
+  JWT auth → RBAC context → Content Safety → SQL generation →
+  sqlglot validation → RBAC rewriting → execution → explanation → audit
 
-The key design decision here is the X-User-Id header. In production this
-would come from an Azure Entra ID token (the authenticated user's identity).
-For the hackathon demo, we pass it as a plain header so judges can switch
-roles instantly via a dropdown in the UI. The backend uses this to load
-the user's RoleContext, which flows through every step of the pipeline.
+Admin impersonation is handled transparently by the auth dependency.
+The `user` dict contains the effective user's identity — either the
+logged-in user or the impersonated user if the admin set X-Impersonate.
 """
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from typing import Optional
-import time
 
-from app.config import settings, get_openai_client
 from app.dependencies.auth import get_current_user
+from app.services.query_engine import QueryEngine
 
 router = APIRouter()
 
+# Single QueryEngine instance shared across all requests
+engine = QueryEngine()
 
-# ---------------------------------------------------------------------------
-# Request / Response models
-# ---------------------------------------------------------------------------
-# These define the API contract between frontend and backend.
-# The frontend team can start building against these shapes immediately
-# even while the backend logic is still stubbed.
-# ---------------------------------------------------------------------------
+
+# —— Request / Response models ———————————————————————————————
 
 class QueryRequest(BaseModel):
     question: str
@@ -39,85 +31,29 @@ class QueryRequest(BaseModel):
 
 
 class QueryResponse(BaseModel):
-    # The answer in plain business language
     answer: str
-    # Raw data for auto-visualization (Day 3)
     visualization: Optional[dict] = None
 
-    # Transparency panel — show the user what happened (Responsible AI)
     generated_sql: str
     executed_sql: str
     was_modified: bool
     modification_explanation: str
     tables_accessed: list[str]
 
-    # Role context — shows the user what access level produced these results
     role_name: str
     access_scope: str
     warnings: list[str]
 
-    # Metadata
     row_count: int
     execution_time_ms: int
-    confidence: str  # "high", "medium", "low", "denied"
+    confidence: str
+
+    # Data for frontend table rendering
+    result_columns: list[str] = []
+    result_rows: list[list] = []
 
 
-class RolesResponse(BaseModel):
-    """Returns available demo roles for the frontend role switcher."""
-    roles: list[dict]
-
-
-# ---------------------------------------------------------------------------
-# GET /api/query/roles — returns the list of demo roles for the UI dropdown
-# ---------------------------------------------------------------------------
-
-@router.get("/roles", response_model=RolesResponse)
-async def get_roles():
-    """
-    Returns the list of available demo roles. The frontend calls this
-    on page load to populate the role switcher dropdown. Each role has
-    an id (sent as X-User-Id header), a display label, and a description
-    explaining what access that role has.
-    """
-    return RolesResponse(
-        roles=[
-            {
-                "id": "demo_doctor",
-                "label": "Dr. Sarah Chen",
-                "icon": "stethoscope",
-                "description": "Physician — sees own patients, full clinical data",
-            },
-            {
-                "id": "demo_nurse",
-                "label": "James Rodriguez, RN",
-                "icon": "heart-pulse",
-                "description": "Nurse — department patients, clinical data, no billing",
-            },
-            {
-                "id": "demo_billing",
-                "label": "Maria Thompson",
-                "icon": "receipt",
-                "description": "Billing — all patients, financial data only, no clinical",
-            },
-            {
-                "id": "demo_researcher",
-                "label": "Dr. Alex Kumar",
-                "icon": "microscope",
-                "description": "Researcher — aggregate data only, no PII, no individual records",
-            },
-            {
-                "id": "demo_admin",
-                "label": "System Admin",
-                "icon": "shield",
-                "description": "Admin — full access to all data",
-            },
-        ]
-    )
-
-
-# ---------------------------------------------------------------------------
-# POST /api/query/ask — the main query endpoint
-# ---------------------------------------------------------------------------
+# —— POST /api/query/ask ————————————————————————————————————
 
 @router.post("/ask", response_model=QueryResponse)
 async def ask_question(
@@ -125,75 +61,60 @@ async def ask_question(
     user: dict = Depends(get_current_user),
 ):
     """
-    Accept a natural language question and return an AI-generated answer.
+    Accept a natural language question and run the full NL-to-SQL pipeline.
 
-    Authentication is handled via JWT token in the Authorization header.
-    The user's role is extracted from the token and determines what data
-    they can access. Admins can impersonate other users via the
-    X-Impersonate header (handled by the auth dependency).
-
-    Day 1: Returns a stubbed response with real LLM-generated SQL.
-    Day 2: Full pipeline — RBAC → Content Safety → SQL generation
-            → validation → rewriting → execution → explanation.
+    The user's identity comes from the JWT token (or admin impersonation).
+    Their role determines what data they can access — the same question
+    produces different results depending on who's asking.
     """
-    start_time = time.time()
+    # The effective user is either the actual user or the impersonated user
+    effective_user_id = user.get("external_id")
+    impersonated_by = user.get("impersonated_by")
 
-    # The user dict comes from JWT (or impersonation if admin)
-    user_id = user.get("external_id", "unknown")
-    role_name = user.get("role_name", "unknown")
-    display_name = user.get("display_name", "Unknown User")
-
-    client = get_openai_client()
-    model = settings.model_name
-
-    try:
-        llm_response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a healthcare SQL analytics expert. "
-                        "Generate a T-SQL SELECT query for the question. "
-                        "The database has tables: patients, encounters, conditions, "
-                        "medications, observations, procedures, immunizations, "
-                        "allergies, careplans, claims, claims_transactions, "
-                        "imaging_studies, devices, supplies, payers, "
-                        "payer_transitions, organizations, providers."
-                    ),
-                },
-                {"role": "user", "content": request.question},
-            ],
-            temperature=0,
-            max_tokens=500,
-        )
-        generated_sql = llm_response.choices[0].message.content.strip()
-    except Exception as e:
-        generated_sql = f"-- LLM Error: {str(e)}"
-
-    execution_time_ms = int((time.time() - start_time) * 1000)
-
-    # ── Stubbed response showing the API contract shape ───────────
-    # The frontend can build against this structure right now.
-    # Day 2 will populate every field with real data.
-    return QueryResponse(
-        answer=(
-            f"[Day 1 Stub] Received question as **{display_name}** ({role_name}): "
-            f"\"{request.question}\"\n\n"
-            f"Generated SQL:\n```sql\n{generated_sql}\n```\n\n"
-            f"Full pipeline (RBAC filtering, SQL execution, result explanation) "
-            f"will be wired on Day 2."
-        ),
-        visualization=None,
-        generated_sql=generated_sql,
-        executed_sql="-- Not yet executed (Day 2)",
-        was_modified=False,
-        modification_explanation="",
-        tables_accessed=[],
-        role_name=role_name,
-        access_scope="stub",
-        warnings=[],
-        row_count=0,
-        execution_time_ms=execution_time_ms,
-        confidence="stub",
+    result = await engine.execute_query(
+        question=request.question,
+        user_external_id=effective_user_id,
+        impersonated_by=impersonated_by,
+        conversation_history=request.conversation_history,
     )
+
+    return QueryResponse(
+        answer=result.answer,
+        visualization=result.visualization,
+        generated_sql=result.generated_sql,
+        executed_sql=result.executed_sql,
+        was_modified=result.was_modified,
+        modification_explanation=result.modification_explanation,
+        tables_accessed=result.tables_accessed,
+        role_name=result.role_name,
+        access_scope=result.access_scope,
+        warnings=result.warnings,
+        row_count=result.row_count,
+        execution_time_ms=result.execution_time_ms,
+        confidence=result.confidence,
+        result_columns=result.result_columns,
+        result_rows=result.raw_results[:100],  # Cap at 100 rows for frontend
+    )
+
+
+# —— GET /api/query/roles ———————————————————————————————————
+# Kept for backwards compatibility — the frontend's impersonation
+# dropdown now uses /api/auth/users instead, but this endpoint
+# is still useful for unauthenticated role discovery.
+
+@router.get("/roles")
+async def get_roles():
+    return {
+        "roles": [
+            {"id": "demo_doctor", "label": "Dr. Sarah Chen", "icon": "stethoscope",
+             "description": "Physician — sees own patients, full clinical data"},
+            {"id": "demo_nurse", "label": "James Rodriguez, RN", "icon": "heart-pulse",
+             "description": "Nurse — department patients, clinical data, no billing"},
+            {"id": "demo_billing", "label": "Maria Thompson", "icon": "receipt",
+             "description": "Billing — all patients, financial data only, no clinical"},
+            {"id": "demo_researcher", "label": "Dr. Alex Kumar", "icon": "microscope",
+             "description": "Researcher — aggregate data only, no PII"},
+            {"id": "demo_admin", "label": "System Admin", "icon": "shield",
+             "description": "Admin — full access to all data"},
+        ]
+    }
