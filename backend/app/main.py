@@ -17,7 +17,7 @@ Then visit:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
-from app.routers import auth, query
+from app.routers import auth, query, audit
 
 app = FastAPI(
     title="Query-to-Insight Analytics Engine",
@@ -41,8 +41,8 @@ app.add_middleware(
         settings.frontend_url,                         # Production Static Web App
     ],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Impersonate"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # ---------------------------------------------------------------------------
@@ -50,6 +50,7 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(query.router, prefix="/api/query", tags=["query"])
+app.include_router(audit.router, prefix="/api/audit", tags=["audit"])
 
 
 # ---------------------------------------------------------------------------
