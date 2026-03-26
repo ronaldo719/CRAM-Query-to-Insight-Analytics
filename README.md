@@ -1,114 +1,221 @@
 # CRAM — Query-to-Insight Analytics Engine
 **Microsoft Innovation Challenge 2026**
 
-An agentic analytics engineer that converts natural language questions into validated, RBAC-filtered SQL queries against a clinical/financial database, then explains the results in plain language.
+An agentic analytics engineer that converts natural language questions into validated, RBAC-filtered SQL queries against a clinical/financial database, then explains the results in plain language — with built-in Responsible AI guardrails and conversational follow-up.
 
 ---
 
-## Day 2 Checkpoint ✅
+## Day 3 — Complete Build
 
 ### What's Built
 
-**Full NL-to-SQL Pipeline** — A single `POST /api/query/ask` call runs the complete pipeline:
+**14-Step NL-to-SQL Pipeline** — A single `POST /api/query/ask` call runs:
 
 ```
-JWT auth → RBAC context → Content Safety → SQL generation →
-sqlglot validation → RBAC rewriting → execution → explanation → audit
+JWT auth → RBAC context → Content Safety → Sensitivity classification →
+SQL generation (with conversation context) → sqlglot validation (3× retry) →
+RBAC rewriting → execution → Bias detection → explanation →
+Output safety → visualization → Follow-up suggestions →
+Conversation storage → Audit log
 ```
 
-**Backend Services (FastAPI)**
-- `app/services/rbac_service.py` — Loads complete role context from DB (`app_users → app_roles → app_role_column_access`)
-- `app/services/content_safety_service.py` — Azure AI Content Safety screening (input + output) with graceful degradation
-- `app/services/query_engine.py` — Pipeline orchestrator: 9-step execution with 3-retry self-correction loop
-- `app/services/sql_validator.py` — 8-layer SQL validation using sqlglot AST parsing
-- `app/services/sql_rewriter.py` — Defense-in-depth row-level filter injection via subquery wrapping
-- `app/routers/query.py` — Updated to delegate to `QueryEngine` (replaces Day 1 stub)
+### Responsible AI Features (6 Microsoft Principles)
 
-**Frontend (React + Vite)**
-- `src/App.tsx` — Full query UI with results table, SQL transparency panel, visualization
-- `src/AuthContext.tsx` — Session management, login/logout, `authFetch` wrapper, impersonation
+| Principle | Implementation |
+|-----------|---------------|
+| **Fairness** | Bias detector flags >20% demographic disparities in query results |
+| **Reliability & Safety** | Content Safety screens input/output; 3× self-correction loop |
+| **Privacy & Security** | Sensitivity classifier (green/amber/red) blocks PII and stigmatized condition queries |
+| **Inclusiveness** | Role-based access ensures each user sees appropriate data |
+| **Transparency** | SQL transparency panel shows generated/executed SQL; modification explanations |
+| **Accountability** | Full audit log with denial reasons, latency, safety scores per query |
 
-**Infrastructure**
-- Azure SQL Database (`synthea-health`) — 18 Synthea clinical/financial tables + RBAC tables + audit log
-- Azure OpenAI (`gpt-4o-mini`) — SQL generation, result explanation, and visualization spec generation
-- Azure AI Content Safety — Input/output screening (degrades gracefully when not configured)
-- Read-only DB user (`q2i_readonly`) — Defense-in-depth: even if SQL contains mutations, the database rejects them
+### Innovation Features
+
+| Feature | Description |
+|---------|-------------|
+| **Conversation memory** | Last 5 Q&A pairs per session; follow-ups like "break that down by age" resolve correctly |
+| **Proactive suggestions** | 3 contextual follow-up questions generated after each answer (clickable chips) |
+| **Bias detection** | Scans results for demographic dimensions + outcome measures; flags disparities |
+| **Sensitivity classification** | Two-tier (rule-based + LLM) query classification before SQL generation |
+| **Audit dashboard** | Admin panel with total queries, denial rate, RBAC modifications, latency stats |
 
 ---
 
-## Query Pipeline — How It Works
+## Project Structure
+
+```
+CRAM-Query-to-Insight-Analytics/
+├── backend/
+│   ├── app/
+│   │   ├── __init__.py
+│   │   ├── main.py                          # FastAPI entry, CORS, router registration
+│   │   ├── config.py                        # Settings + OpenAI client factory
+│   │   ├── dependencies/
+│   │   │   └── auth.py                      # get_current_user, require_admin
+│   │   ├── routers/
+│   │   │   ├── __init__.py
+│   │   │   ├── auth.py                      # /api/auth/* endpoints
+│   │   │   ├── query.py                     # /api/query/ask + /clear-history
+│   │   │   └── audit.py                     # /api/audit/stats + /log (admin)
+│   │   └── services/
+│   │       ├── __init__.py
+│   │       ├── auth_service.py              # bcrypt hashing, JWT, DB auth
+│   │       ├── rbac_service.py              # RoleContext loader from DB
+│   │       ├── content_safety_service.py    # Azure Content Safety screening
+│   │       ├── sql_validator.py             # 8-layer sqlglot validation
+│   │       ├── sql_rewriter.py              # RBAC filter injection (CTE + inline)
+│   │       ├── query_engine.py              # 14-step pipeline orchestrator
+│   │       ├── sensitivity_classifier.py    # Green/amber/red classification
+│   │       ├── conversation_manager.py      # Session memory + suggestions
+│   │       └── bias_detector.py             # Demographic disparity alerts
+│   ├── scripts/
+│   │   ├── setup_database.py               # Schema + Synthea data loading
+│   │   └── migrate_auth.py                 # Password seeding
+│   ├── requirements.txt
+│   └── test_openai.py
+├── frontend/
+│   ├── src/
+│   │   ├── App.tsx                          # Full Day 3 UI with all panels
+│   │   ├── AuthContext.tsx                  # Session state, authFetch, impersonation
+│   │   ├── LoginPage.tsx                    # Login form + demo quick-login
+│   │   ├── main.jsx
+│   │   └── index.css
+│   ├── tsconfig.json
+│   └── package.json
+├── .env                                     # gitignored — secrets
+└── .gitignore
+```
+
+---
+
+## Query Pipeline — 14 Steps
 
 ```
                     ┌─────────────────────────────────────────────┐
                     │            POST /api/query/ask              │
-                    │         { question, history? }              │
+                    │              { question }                   │
                     └──────────────────┬──────────────────────────┘
                                        │
                     ┌──────────────────▼──────────────────────────┐
-                    │  Step 1: Load RBAC Context                  │
-                    │  rbac_service.get_role_context(external_id) │
-                    │  → app_users → app_roles → column_access    │
+                    │  1. Load RBAC Context                       │
+                    │  app_users → app_roles → column_access      │
                     └──────────────────┬──────────────────────────┘
                                        │
                     ┌──────────────────▼──────────────────────────┐
-                    │  Step 2: Content Safety Screening           │
-                    │  Screen user's question for harmful content │
-                    │  → Block or allow                           │
+                    │  2. Content Safety Screening                │
+                    │  Block harmful input before any processing  │
                     └──────────────────┬──────────────────────────┘
                                        │
                     ┌──────────────────▼──────────────────────────┐
-                    │  Step 3: Generate SQL (Azure OpenAI)        │
-                    │  System prompt = schema + role constraints   │
-                    │  + few-shot examples + conversation history  │
+                    │  3. Sensitivity Classification              │
+                    │  Rule-based → LLM fallback                  │
+                    │  GREEN: proceed | AMBER: advisory | RED: block│
                     └──────────────────┬──────────────────────────┘
                                        │
                     ┌──────────────────▼──────────────────────────┐
-                    │  Step 4: Validate SQL (sqlglot)             │
-                    │  8 layers: parse → no mutations → no system │
-                    │  tables → table access → column access →    │
-                    │  aggregate enforcement → TOP injection →    │
-                    │  row scope check                            │
-                    │  ↻ If invalid, retry up to 3× with error   │
+                    │  4. Generate SQL (Azure OpenAI)             │
+                    │  Schema + role constraints + conversation   │
+                    │  history included in prompt                 │
                     └──────────────────┬──────────────────────────┘
                                        │
                     ┌──────────────────▼──────────────────────────┐
-                    │  Step 5: Rewrite SQL with RBAC Filters      │
-                    │  Wrap in subquery + EXISTS filter for        │
-                    │  provider/org/k-anonymity enforcement       │
+                    │  5. Validate SQL (sqlglot, 8 layers)        │
+                    │  ↻ Retry up to 3× with error feedback      │
                     └──────────────────┬──────────────────────────┘
                                        │
                     ┌──────────────────▼──────────────────────────┐
-                    │  Step 6: Execute SQL (read-only connection)  │
-                    │  q2i_readonly user, 30s timeout, 500 row cap│
+                    │  6. Rewrite SQL with RBAC Filters           │
+                    │  CTE wrapper or inline injection            │
                     └──────────────────┬──────────────────────────┘
                                        │
                     ┌──────────────────▼──────────────────────────┐
-                    │  Step 7: Generate Explanation (Azure OpenAI) │
-                    │  Plain-language summary of results           │
+                    │  7. Execute SQL (read-only connection)      │
+                    │  30s timeout, 500 row cap                   │
                     └──────────────────┬──────────────────────────┘
                                        │
                     ┌──────────────────▼──────────────────────────┐
-                    │  Step 8: Screen Output (Content Safety)      │
-                    │  Catch harmful content in LLM explanations   │
+                    │  8. Bias Detection                          │
+                    │  Scan for demographic disparities (>20%)    │
                     └──────────────────┬──────────────────────────┘
                                        │
                     ┌──────────────────▼──────────────────────────┐
-                    │  Step 9: Generate Visualization Spec         │
-                    │  LLM recommends chart type + formats data    │
-                    │  for Recharts (bar/line/pie/scatter/table)   │
+                    │  9. Generate Explanation (Azure OpenAI)     │
                     └──────────────────┬──────────────────────────┘
                                        │
                     ┌──────────────────▼──────────────────────────┐
-                    │  Audit Log: Write everything to              │
-                    │  dbo.app_query_audit_log                     │
+                    │  10. Screen Output (Content Safety)         │
+                    └──────────────────┬──────────────────────────┘
+                                       │
+                    ┌──────────────────▼──────────────────────────┐
+                    │  11. Generate Visualization Spec            │
+                    │  bar / line / pie / scatter / table         │
+                    └──────────────────┬──────────────────────────┘
+                                       │
+                    ┌──────────────────▼──────────────────────────┐
+                    │  12. Generate Follow-up Suggestions         │
+                    │  3 contextual questions via LLM             │
+                    └──────────────────┬──────────────────────────┘
+                                       │
+                    ┌──────────────────▼──────────────────────────┐
+                    │  13. Store in Conversation Memory           │
+                    │  Last 5 Q&A pairs per user session          │
+                    └──────────────────┬──────────────────────────┘
+                                       │
+                    ┌──────────────────▼──────────────────────────┐
+                    │  14. Audit Log                              │
+                    │  User, role, SQL, timing, sensitivity,      │
+                    │  safety scores → dbo.app_query_audit_log    │
                     └─────────────────────────────────────────────┘
 ```
 
 ---
 
-## SQL Validation — 8 Layers
+## Sensitivity Classification
 
-The `SQLValidator` parses every LLM-generated query with **sqlglot** and enforces:
+The `SensitivityClassifier` evaluates each query **before SQL generation** using a two-tier approach:
+
+**Tier 1 — Rule-based (zero API calls):**
+- Stigmatized conditions (HIV, substance abuse, mental health) + individual access → RED
+- PII requests (SSN, passport, drivers license) without PII permission → RED
+- Demographic correlations (by race, by ethnicity, disparities) → AMBER
+- Standard analytics (count, total, average, top) → GREEN
+
+**Tier 2 — LLM classification (ambiguous queries only):**
+- Single API call to classify as GREEN/AMBER/RED with reason
+
+| Level | UI | Behavior |
+|-------|----|----------|
+| GREEN | Green dot badge | Proceed silently |
+| AMBER | Amber dot + advisory notice | Proceed with contextual warning |
+| RED | Red dot + blocked | Query blocked, explanation shown |
+
+---
+
+## Bias Detection
+
+The `BiasDetector` analyzes query results **after execution**:
+
+1. Scans column names for **demographic dimensions** (race, gender, ethnicity, age_group)
+2. Scans for **outcome measures** (count, cost, average, rate)
+3. When both are present, calculates variation across groups
+4. If disparity exceeds **20% threshold**, generates a fairness notice
+
+Example output:
+> Demographic disparity detected: 'avg_healthcare_expenses' varies by 95% across 'RACE' groups (highest: asian, lowest: native). This may reflect underlying health disparities, data collection biases, or social determinants of health. Consider consulting domain experts before drawing conclusions.
+
+---
+
+## Conversation Manager
+
+- **Session memory**: Stores last 5 question/SQL pairs per user (in-memory, keyed by `external_id`)
+- **Context resolution**: Follow-up questions like "now break that down by age group" include prior query history in the LLM prompt
+- **Proactive suggestions**: After each answer, generates 3 follow-up questions via LLM; displayed as clickable chips
+- **Role isolation**: `POST /api/query/clear-history` resets memory on role switch to prevent context leakage
+
+---
+
+## SQL Validation — 8 Layers
 
 | Layer | Check | Action |
 |-------|-------|--------|
@@ -125,10 +232,9 @@ The `SQLValidator` parses every LLM-generated query with **sqlglot** and enforce
 
 ## SQL Rewriter — Defense in Depth
 
-Even if the LLM correctly includes RBAC filters, the rewriter **unconditionally** wraps the query with access controls. This prevents prompt injection from bypassing row-level security.
+The rewriter **unconditionally** enforces row-level access, using two strategies depending on query type:
 
-**Strategy:** Wrap the LLM's SQL in a subquery and add an `EXISTS` filter:
-
+**Non-aggregate queries** — CTE wrapper:
 ```sql
 -- RBAC: filtered to provider e5a3f7ff-...
 SELECT rbac_outer.* FROM (
@@ -141,6 +247,10 @@ WHERE EXISTS (
 )
 ```
 
+**Aggregate queries (GROUP BY)** — Inline injection:
+- Detects existing provider/org filters and skips if already present
+- Otherwise injects `EXISTS` subquery into the WHERE clause before GROUP BY
+
 | Scope | Filter |
 |-------|--------|
 | `own_patients` | `encounters.PROVIDER = '{provider_id}'` |
@@ -148,38 +258,32 @@ WHERE EXISTS (
 | `aggregate_only` | Injects `HAVING COUNT(*) >= 5` for k-anonymity |
 | `all` | No rewriting needed |
 
-The rewriter auto-detects the patient column name (`Id` vs `PATIENT`) from the inner query's SELECT clause.
-
 ---
 
 ## Content Safety Integration
 
-Azure AI Content Safety screens text at **two points** in the pipeline:
+Azure AI Content Safety screens text at **two points**:
 
 1. **Before the LLM** — Block harmful user questions (prompt injection, hate, violence, etc.)
 2. **After the LLM** — Catch harmful content in generated explanations
 
-**Graceful degradation:** If Content Safety is not configured (missing endpoint/key), the service logs a warning and allows requests through. This prevents breakage during local development.
-
-| Category | Severity 0 | Severity 2+ |
-|----------|------------|-------------|
-| Hate | Safe | Blocked |
-| Violence | Safe | Blocked |
-| Sexual | Safe | Blocked |
-| Self-harm | Safe | Blocked |
+**Graceful degradation:** If Content Safety is not configured, the service logs a warning and allows requests through.
 
 ---
 
 ## Verified Test Scenarios
 
-| # | Role | Query | Expected | Result |
-|---|------|-------|----------|--------|
-| 1 | **Admin** | "How many patients by gender?" | Full results + bar chart | ✅ 180 F, 159 M returned |
-| 2 | **Doctor** | "Show me my patients with diabetes" | Own patients only, CTE wrapper | ✅ 3 patients, provider filter in `executed_sql` |
-| 3 | **Billing** | "Patients with diabetes and medications" | Denied — clinical tables | ✅ `conditions` and `medications` blocked |
-| 4a | **Researcher** | "Count conditions by type" | Aggregate with k-anonymity | ✅ 151 rows, `HAVING COUNT(*) >= 5` |
-| 4b | **Researcher** | "Show me patient names" | Denied — individual records | ✅ LLM refused, aggregate-only constraint |
-| 5 | **Nurse** | "What are encounter costs?" | Denied — cost columns | ✅ Claims table not in allowed tables |
+| # | Scenario | Query | Expected | Result |
+|---|----------|-------|----------|--------|
+| 1 | **Green sensitivity** | "How many patients by gender?" | GREEN badge, no advisory | ✅ 2 rows, suggestions generated |
+| 2 | **Amber sensitivity** | "What is diabetes prevalence by race?" | AMBER badge + advisory + bias alert | ✅ 6 rows, 94% disparity flagged |
+| 3 | **Red sensitivity** | "List individual patients with HIV and their addresses" | RED, query blocked | ✅ Blocked with privacy explanation |
+| 4 | **Follow-up conversation** | "Break that down by age group" | Uses prior query context | ✅ 16 rows, age+race breakdown |
+| 5 | **Bias detection** | "Compare average healthcare costs by race" | AMBER + fairness notice | ✅ 95% disparity flagged |
+| 6 | **Audit dashboard** | Admin clicks "Show audit log" | Stats panel renders | ✅ Total queries, denial rate, by-role breakdown |
+| 7 | **Physician RBAC** | Doctor: "How many patients by gender?" | Own patients only | ✅ 6 patients (4F, 2M), provider filter applied |
+| 8 | **Billing denied** | Billing: "Patients with diabetes and medications" | Clinical tables blocked | ✅ `conditions` and `medications` denied |
+| 9 | **Researcher k-anonymity** | Researcher: "Count conditions by type" | Aggregate + HAVING | ✅ k-anonymity enforced |
 
 ---
 
@@ -193,29 +297,17 @@ Azure AI Content Safety screens text at **two points** in the pipeline:
 | `GET` | `/api/auth/me` | Cookie | Current user (or impersonated user) |
 | `POST` | `/api/auth/register` | Admin | Create new user |
 | `GET` | `/api/auth/users` | Admin | List users for impersonation dropdown |
-| `POST` | `/api/query/ask` | Cookie | **Full NL-to-SQL pipeline** |
+| `POST` | `/api/query/ask` | Cookie | **Full 14-step NL-to-SQL pipeline** |
+| `POST` | `/api/query/clear-history` | Cookie | Reset conversation memory (on role switch) |
 | `GET` | `/api/query/roles` | No | Demo roles for role switcher |
+| `GET` | `/api/audit/stats` | Admin | Aggregate audit statistics |
+| `GET` | `/api/audit/log` | Admin | Detailed audit entries (filterable) |
 
 ---
 
 ## Authentication System
 
-The app uses stateless JWT-based authentication. Tokens are stored in **httpOnly cookies** — never exposed to JavaScript.
-
-### Login Flow
-
-```
-Browser                         FastAPI Backend                    Azure SQL
-  │                                    │                               │
-  │── POST /api/auth/login ──────────> │                               │
-  │   { username, password }           │── SELECT user + bcrypt hash ->│
-  │                                    │<─ row ─────────────────────── │
-  │                                    │   verify_password(plain, hash) │
-  │                                    │   create_access_token(payload) │
-  │<─ 200 { user: {...} } ────────────│
-  │   Set-Cookie: q2i_token=<jwt>;    │
-  │   HttpOnly; Secure; SameSite=Lax  │
-```
+Stateless JWT-based auth. Tokens stored in **httpOnly cookies** — never exposed to JavaScript.
 
 ### JWT Token Structure
 
@@ -231,7 +323,7 @@ Signed with **HS256** using `JWT_SECRET_KEY` (no fallback — app refuses to sta
 
 ### Admin Impersonation
 
-Admin can act as any user via `X-Impersonate` header. The auth dependency loads the impersonated user's profile from DB and sets `impersonated_by` for audit tracking.
+Admin can act as any user via `X-Impersonate` header. The auth dependency loads the impersonated user's profile from DB and sets `impersonated_by` for audit tracking. Frontend clears conversation history on role switch.
 
 ---
 
@@ -239,67 +331,51 @@ Admin can act as any user via `X-Impersonate` header. The auth dependency loads 
 
 | Role | `row_scope` | Allowed Tables | Denied Columns | PII |
 |------|-------------|----------------|----------------|-----|
-| **Physician** | own_patients | All clinical + financial | — | ✅ |
-| **Nurse** | department | Clinical tables only | Cost columns | ❌ |
-| **Billing** | all | Financial + patients + encounters | Clinical tables blocked | ❌ |
-| **Researcher** | aggregate_only | All clinical + financial | PII columns | ❌ |
-| **Admin** | all | All tables | — | ✅ |
+| **Physician** | own_patients | All clinical + financial | — | Yes |
+| **Nurse** | department | Clinical tables only | Cost columns | No |
+| **Billing** | all | Financial + patients + encounters | Clinical tables blocked | No |
+| **Researcher** | aggregate_only | All clinical + financial | PII columns | No |
+| **Admin** | all | All tables | — | Yes |
 
-The `RoleContext` object flows through every pipeline step:
+The `RoleContext` flows through every pipeline step:
 1. **System prompt** — `to_prompt_constraints()` generates LLM-readable access rules
 2. **SQL validator** — Checks table/column access against allowed lists
 3. **SQL rewriter** — Injects mandatory WHERE/EXISTS filters
-4. **Audit log** — Records role, scope, and impersonation context
+4. **Sensitivity classifier** — PII access check for RED classification
+5. **Audit log** — Records role, scope, and impersonation context
 
 ---
 
-## Project Structure
+## Security — Defense in Depth
 
-```
-CRAM-Query-to-Insight-Analytics/
-├── backend/
-│   ├── app/
-│   │   ├── __init__.py
-│   │   ├── main.py                       # FastAPI entry point, CORS config
-│   │   ├── config.py                     # Settings + OpenAI client factory
-│   │   ├── dependencies/
-│   │   │   └── auth.py                   # get_current_user, require_admin
-│   │   ├── routers/
-│   │   │   ├── __init__.py
-│   │   │   ├── auth.py                   # /api/auth/* endpoints
-│   │   │   └── query.py                  # /api/query/ask → QueryEngine
-│   │   └── services/
-│   │       ├── __init__.py
-│   │       ├── auth_service.py           # bcrypt hashing, JWT, DB auth
-│   │       ├── rbac_service.py           # RoleContext loader from DB
-│   │       ├── content_safety_service.py # Azure Content Safety screening
-│   │       ├── sql_validator.py          # 8-layer sqlglot validation
-│   │       ├── sql_rewriter.py           # Subquery RBAC filter injection
-│   │       └── query_engine.py           # Pipeline orchestrator (9 steps)
-│   ├── scripts/                          # gitignored — setup/migration
-│   │   ├── setup_database.py
-│   │   └── migrate_auth.py
-│   ├── requirements.txt
-│   └── test_openai.py
-├── frontend/
-│   ├── src/
-│   │   ├── App.tsx                       # Query UI + results + visualization
-│   │   ├── AuthContext.tsx               # Session state, authFetch, impersonation
-│   │   ├── LoginPage.tsx                 # Login form + demo quick-login
-│   │   ├── main.jsx
-│   │   └── index.css
-│   ├── tsconfig.json
-│   └── package.json
-├── .env                                  # gitignored — secrets
-└── .gitignore
-```
+| Layer | Protection |
+|-------|-----------|
+| **Layer 1: Authentication** | JWT in httpOnly cookie, bcrypt passwords |
+| **Layer 2: Content Safety** | Azure AI screens input before LLM and output after LLM |
+| **Layer 3: Sensitivity Gate** | RED queries blocked before SQL generation even starts |
+| **Layer 4: LLM Prompt** | Role constraints injected into system prompt as mandatory rules |
+| **Layer 5: SQL Validation** | sqlglot AST parsing blocks mutations, system tables, denied columns |
+| **Layer 6: SQL Rewriting** | Unconditional RBAC filter injection — bypasses prompt injection |
+| **Layer 7: Read-only DB** | `q2i_readonly` user has only `db_datareader` — mutations rejected at DB level |
+| **Layer 8: Audit Logging** | Every query attempt logged with user, role, SQL, timing, safety scores |
+
+---
+
+## Azure Services (6)
+
+- Azure SQL Database — Synthea data + RBAC tables + audit log
+- Azure OpenAI (gpt-4o-mini) — SQL generation, explanation, visualization, suggestions, sensitivity classification
+- Azure AI Content Safety — Input/output screening
+- Key Vault — Secret storage
+- Application Insights — Monitoring
+- Log Analytics Workspace — Centralized logging
 
 ---
 
 ## Local Development
 
 **Prerequisites**
-- Node.js 20+ (use `nvm use 20`)
+- Node.js 20+ (use `nvm use 22`)
 - Python 3.11+
 - ODBC Driver 18 for SQL Server
 
@@ -315,7 +391,7 @@ uvicorn app.main:app --reload --port 8000
 **Frontend**
 ```bash
 cd frontend
-nvm use 20
+nvm use 22
 npm install
 npm run dev
 # → http://localhost:5173
@@ -335,49 +411,26 @@ FRONTEND_URL=http://localhost:5173
 JWT_SECRET_KEY=...   # generate: python3 -c "import secrets; print(secrets.token_hex(32))"
 ```
 
-### Testing the Pipeline
+### Demo Credentials
 
-1. Open Swagger UI at `http://localhost:8000/docs`
-2. `POST /api/auth/login` with `{"username": "demo_admin", "password": "admin123"}`
-3. `POST /api/query/ask` with `{"question": "What are the top 10 most common conditions?"}`
-4. Test RBAC by logging in as different users (e.g., `demo_billing` / `billing123`)
-
----
-
-## Security — Defense in Depth
-
-| Layer | Protection |
-|-------|-----------|
-| **Layer 1: Authentication** | JWT in httpOnly cookie, bcrypt passwords, no token in response body |
-| **Layer 2: Content Safety** | Azure AI screens input before LLM and output after LLM |
-| **Layer 3: LLM Prompt** | Role constraints injected into system prompt as mandatory rules |
-| **Layer 4: SQL Validation** | sqlglot AST parsing blocks mutations, system tables, denied columns |
-| **Layer 5: SQL Rewriting** | Unconditional subquery wrapping — bypasses prompt injection |
-| **Layer 6: Read-only DB** | `q2i_readonly` user has only `db_datareader` — mutations rejected at DB level |
-| **Layer 7: Audit Logging** | Every query attempt logged with user, role, SQL, timing, safety scores |
+| Username | Password | Role |
+|----------|----------|------|
+| `demo_admin` | `admin123` | Admin — full access |
+| `demo_doctor` | `doctor123` | Physician — own patients |
+| `demo_nurse` | `nurse123` | Nurse — department |
+| `demo_billing` | `billing123` | Billing — financial only |
+| `demo_researcher` | `researcher123` | Researcher — aggregate only |
 
 ---
 
-## Azure Services (6)
+## Scoring Alignment
 
-- ✅ Azure SQL Database — Synthea data + RBAC tables + audit log
-- ✅ Azure OpenAI (gpt-4o-mini) — SQL generation, explanation, visualization
-- ✅ Azure AI Content Safety — Input/output screening
-- ✅ Key Vault — Secret storage
-- ✅ Application Insights — Monitoring
-- ✅ Log Analytics Workspace — Centralized logging
-
----
-
-## Day 3 — Planned (Responsible AI + Innovation)
-
-- Auto-visualization: bar/line/pie chart rendering with Recharts
-- Split `App.tsx` into components: `QueryInput`, `SQLPanel`, `ResultsTable`, `VisualizationPanel`
-- Tailwind CSS + Lucide React icons
-- Sensitivity classification (green/amber/red)
-- Proactive follow-up question suggestions
-- Approval workflow for sensitive queries
-- Audit log viewer page
+| Criteria (25% each) | Coverage |
+|---------------------|----------|
+| **Responsible AI** | Sensitivity classifier (Privacy & Security), bias detector (Fairness), audit log (Accountability), content safety (Reliability & Safety), SQL transparency (Transparency), RBAC (Inclusiveness) |
+| **Innovation** | Conversational memory with follow-ups, proactive suggestion chips, bias detection, two-tier sensitivity classification |
+| **Azure Services** | SQL Database, OpenAI, Content Safety, Key Vault, App Insights, Log Analytics |
+| **Functionality** | 14-step pipeline, 5 distinct roles, 8-layer SQL validation, defense-in-depth security |
 
 ---
 

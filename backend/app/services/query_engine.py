@@ -1,20 +1,28 @@
 """
-Query Engine — Orchestrates the complete NL-to-SQL pipeline.
+Query Engine -- Day 3: Full pipeline with Responsible AI + Innovation features.
 
-This is the brain of the application. A single call to execute_query()
-runs the full pipeline:
+Changes from Day 2:
+  + Sensitivity classification (green/amber/red) before SQL generation
+  + Conversation memory for follow-up questions
+  + Bias detection on query results
+  + Proactive follow-up suggestions after each answer
+  + Enhanced audit logging with sensitivity + bias fields
 
-  1. Load RoleContext from database (via RBACService)
-  2. Screen input through Content Safety
-  3. Generate SQL with role-aware system prompt (via Azure OpenAI)
-  4. Validate SQL against RBAC rules (via SQLValidator)
-  5. Rewrite SQL with mandatory access filters (via SQLRewriter)
-  6. Execute SQL against read-only database connection
-  7. Generate natural language explanation (via Azure OpenAI)
-  8. Log everything to the audit table
-
-If SQL generation fails validation, the engine retries up to 3 times
-with the error message fed back to the LLM (self-correction loop).
+Pipeline order:
+  1. Load RoleContext (RBACService)
+  2. Screen input (Content Safety)
+  3. Classify sensitivity (green/amber/red)
+  4. Generate SQL with conversation context (Azure OpenAI)
+  5. Validate SQL (sqlglot + RBAC rules)
+  6. Rewrite SQL (CTE wrapping for row filters)
+  7. Execute SQL (read-only connection)
+  8. Detect bias in results
+  9. Generate explanation (Azure OpenAI)
+  10. Screen output (Content Safety)
+  11. Generate visualization spec
+  12. Generate follow-up suggestions
+  13. Store in conversation memory
+  14. Audit log
 """
 
 import time
@@ -25,9 +33,12 @@ from dataclasses import dataclass, field
 
 from app.config import settings, get_openai_client
 from app.services.rbac_service import RBACService, RoleContext
-from app.services.sql_validator import SQLValidator, ValidationResult
+from app.services.sql_validator import SQLValidator
 from app.services.sql_rewriter import SQLRewriter
 from app.services.content_safety_service import ContentSafetyService
+from app.services.sensitivity_classifier import SensitivityClassifier
+from app.services.conversation_manager import ConversationManager
+from app.services.bias_detector import BiasDetector
 
 
 @dataclass
@@ -50,7 +61,14 @@ class QueryResult:
     execution_time_ms: int = 0
     confidence: str = "high"
 
-    # Internal tracking
+    # Day 3 additions
+    sensitivity_level: str = "green"
+    sensitivity_reason: str = ""
+    sensitivity_advisory: str = ""
+    bias_alert: Optional[str] = None
+    suggestions: list[str] = field(default_factory=list)
+
+    # Internal
     was_denied: bool = False
     denial_reason: str = ""
     content_safety_scores: dict = field(default_factory=dict)
@@ -59,10 +77,7 @@ class QueryResult:
     result_columns: list[str] = field(default_factory=list)
 
 
-# —— Synthea Schema Description for the LLM System Prompt ———————————
-# This is an abbreviated, token-efficient description of the database
-# that gives the LLM enough context to generate correct SQL.
-# Column names match EXACTLY — the LLM uses these to write queries.
+# -- Schema and few-shot examples (unchanged from Day 2) ------
 
 SCHEMA_DESCRIPTION = """
 ## DATABASE SCHEMA (Azure SQL / T-SQL syntax)
@@ -77,11 +92,9 @@ SCHEMA_DESCRIPTION = """
 - encounters(Id, START, STOP, PATIENT, ORGANIZATION, PROVIDER, PAYER, ENCOUNTERCLASS, CODE, DESCRIPTION, BASE_ENCOUNTER_COST, TOTAL_CLAIM_COST, PAYER_COVERAGE, REASONCODE, REASONDESCRIPTION)
   ENCOUNTERCLASS values: 'wellness', 'ambulatory', 'outpatient', 'inpatient', 'emergency', 'urgentcare'
 - conditions(ROW_ID, START, STOP, PATIENT, ENCOUNTER, CODE, DESCRIPTION)
-  STOP is NULL for active/ongoing conditions
 - medications(ROW_ID, START, STOP, PATIENT, PAYER, ENCOUNTER, CODE, DESCRIPTION, BASE_COST, PAYER_COVERAGE, DISPENSES, TOTALCOST, REASONCODE, REASONDESCRIPTION)
 - observations(ROW_ID, DATE, PATIENT, ENCOUNTER, CATEGORY, CODE, DESCRIPTION, VALUE, UNITS, TYPE)
-  CATEGORY values: 'vital-signs', 'laboratory', 'survey', 'social-history'
-  VALUE is NVARCHAR — cast to FLOAT for numeric comparisons
+  VALUE is NVARCHAR -- use TRY_CAST(VALUE as FLOAT) for numeric comparisons
 - procedures(ROW_ID, START, STOP, PATIENT, ENCOUNTER, CODE, DESCRIPTION, BASE_COST, REASONCODE, REASONDESCRIPTION)
 - immunizations(ROW_ID, DATE, PATIENT, ENCOUNTER, CODE, DESCRIPTION, BASE_COST)
 - allergies(ROW_ID, START, STOP, PATIENT, ENCOUNTER, CODE, SYSTEM, DESCRIPTION, TYPE, CATEGORY, REACTION1, DESCRIPTION1, SEVERITY1, REACTION2, DESCRIPTION2, SEVERITY2)
@@ -91,52 +104,51 @@ SCHEMA_DESCRIPTION = """
 - imaging_studies(Id, DATE, PATIENT, ENCOUNTER, SERIES_UID, BODYSITE_CODE, BODYSITE_DESCRIPTION, MODALITY_CODE, MODALITY_DESCRIPTION, INSTANCE_UID, SOP_CODE, SOP_DESCRIPTION, PROCEDURE_CODE)
 
 ### Financial tables:
-- claims(Id, PATIENTID, PROVIDERID, PRIMARYPATIENTINSURANCEID, SECONDARYPATIENTINSURANCEID, DEPARTMENTID, DIAGNOSIS1-8, REFERRINGPROVIDERID, APPOINTMENTID, CURRENTILLNESSDATE, SERVICEDATE, SUPERVISINGPROVIDERID, STATUS1, STATUS2, STATUSP, OUTSTANDING1, OUTSTANDING2, OUTSTANDINGP, LASTBILLEDDATE1, LASTBILLEDDATE2, LASTBILLEDDATEP, HEALTHCARECLAIMTYPEID1, HEALTHCARECLAIMTYPEID2)
-  NOTE: PATIENTID and PROVIDERID (not PATIENT/PROVIDER like other tables)
-- claims_transactions(ID, CLAIMID, CHARGEID, PATIENTID, TYPE, AMOUNT, METHOD, FROMDATE, TODATE, PLACEOFSERVICE, PROCEDURECODE, MODIFIER1, MODIFIER2, DIAGNOSISREF1-4, UNITS, DEPARTMENTID, NOTES, UNITAMOUNT, TRANSFEROUTID, TRANSFERTYPE, PAYMENTS, ADJUSTMENTS, TRANSFERS, OUTSTANDING, APPOINTMENTID, LINENOTE, PATIENTINSURANCEID, FEESCHEDULEID, PROVIDERID, SUPERVISINGPROVIDERID)
+- claims(Id, PATIENTID, PROVIDERID, PRIMARYPATIENTINSURANCEID, SECONDARYPATIENTINSURANCEID, DEPARTMENTID, DIAGNOSIS1-8, REFERRINGPROVIDERID, APPOINTMENTID, CURRENTILLNESSDATE, SERVICEDATE, SUPERVISINGPROVIDERID, STATUS1, STATUS2, STATUSP, OUTSTANDING1, OUTSTANDING2, OUTSTANDINGP, LASTBILLEDDATE1-LASTBILLEDDATEP, HEALTHCARECLAIMTYPEID1, HEALTHCARECLAIMTYPEID2)
+  NOTE: PATIENTID (not PATIENT)
+- claims_transactions(ID, CLAIMID, CHARGEID, PATIENTID, TYPE, AMOUNT, METHOD, FROMDATE, TODATE, PLACEOFSERVICE, PROCEDURECODE, MODIFIER1-2, DIAGNOSISREF1-4, UNITS, DEPARTMENTID, NOTES, UNITAMOUNT, TRANSFEROUTID, TRANSFERTYPE, PAYMENTS, ADJUSTMENTS, TRANSFERS, OUTSTANDING, APPOINTMENTID, LINENOTE, PATIENTINSURANCEID, FEESCHEDULEID, PROVIDERID, SUPERVISINGPROVIDERID)
 - payer_transitions(ROW_ID, PATIENT, MEMBERID, START_YEAR, END_YEAR, PAYER, SECONDARY_PAYER, OWNERSHIP, OWNERNAME)
 
 ### Key relationships:
-- encounters.PATIENT → patients.Id
-- encounters.ORGANIZATION → organizations.Id
-- encounters.PROVIDER → providers.Id
-- encounters.PAYER → payers.Id
-- conditions/medications/observations/procedures.PATIENT → patients.Id
-- conditions/medications/observations/procedures.ENCOUNTER → encounters.Id
-- claims.PATIENTID → patients.Id (NOTE: column is PATIENTID not PATIENT)
-- claims_transactions.CLAIMID → claims.Id
+- encounters.PATIENT -> patients.Id
+- encounters.ORGANIZATION -> organizations.Id
+- encounters.PROVIDER -> providers.Id
+- encounters.PAYER -> payers.Id
+- conditions/medications/observations/procedures.PATIENT -> patients.Id
+- conditions/medications/observations/procedures.ENCOUNTER -> encounters.Id
+- claims.PATIENTID -> patients.Id
+- claims_transactions.CLAIMID -> claims.Id
 
 ### Medical terminology mappings:
-- "diabetic patients" → conditions.DESCRIPTION LIKE '%iabetes%'
-- "hypertension" → conditions.DESCRIPTION LIKE '%ypertension%'
-- "length of stay" → DATEDIFF(day, e.START, e.STOP)
-- "readmission" → same patient, new encounter within 30 days of prior STOP
-- "blood pressure" → observations.DESCRIPTION LIKE '%Blood Pressure%'
-- "BMI" → observations.DESCRIPTION LIKE '%Body Mass Index%'
+- "diabetic" -> conditions.DESCRIPTION LIKE '%iabetes%'
+- "hypertension" -> conditions.DESCRIPTION LIKE '%ypertension%'
+- "length of stay" -> DATEDIFF(day, e.START, e.STOP)
+- "blood pressure" -> observations.DESCRIPTION LIKE '%Blood Pressure%'
+- "BMI" -> observations.DESCRIPTION LIKE '%Body Mass Index%'
 """
 
 FEW_SHOT_EXAMPLES = """
-## EXAMPLES (natural language → T-SQL)
+## EXAMPLES
 
-Q: How many patients do we have by gender?
+Q: How many patients by gender?
 SQL: SELECT p.GENDER, COUNT(*) as patient_count FROM patients p GROUP BY p.GENDER ORDER BY patient_count DESC
 
-Q: What are the top 10 most common conditions?
+Q: Top 10 most common conditions?
 SQL: SELECT TOP 10 c.DESCRIPTION, COUNT(DISTINCT c.PATIENT) as patient_count FROM conditions c GROUP BY c.DESCRIPTION ORDER BY patient_count DESC
 
-Q: Show me total encounter costs by payer
+Q: Total encounter costs by payer
 SQL: SELECT py.NAME as payer_name, COUNT(*) as encounter_count, SUM(e.TOTAL_CLAIM_COST) as total_cost, AVG(e.TOTAL_CLAIM_COST) as avg_cost FROM encounters e JOIN payers py ON e.PAYER = py.Id GROUP BY py.NAME ORDER BY total_cost DESC
 
-Q: What medications are most commonly prescribed for diabetes?
-SQL: SELECT TOP 10 m.DESCRIPTION as medication, COUNT(*) as prescription_count FROM medications m WHERE m.REASONDESCRIPTION LIKE '%iabetes%' GROUP BY m.DESCRIPTION ORDER BY prescription_count DESC
+Q: Medications prescribed for diabetes
+SQL: SELECT TOP 10 m.DESCRIPTION as medication, COUNT(*) as rx_count FROM medications m WHERE m.REASONDESCRIPTION LIKE '%iabetes%' GROUP BY m.DESCRIPTION ORDER BY rx_count DESC
 
-Q: Show me the average BMI by age group
+Q: Average BMI by age group
 SQL: SELECT CASE WHEN DATEDIFF(year, p.BIRTHDATE, GETDATE()) < 18 THEN 'Under 18' WHEN DATEDIFF(year, p.BIRTHDATE, GETDATE()) BETWEEN 18 AND 39 THEN '18-39' WHEN DATEDIFF(year, p.BIRTHDATE, GETDATE()) BETWEEN 40 AND 64 THEN '40-64' ELSE '65+' END as age_group, AVG(TRY_CAST(o.VALUE as FLOAT)) as avg_bmi, COUNT(DISTINCT o.PATIENT) as patient_count FROM observations o JOIN patients p ON o.PATIENT = p.Id WHERE o.DESCRIPTION LIKE '%Body Mass Index%' AND TRY_CAST(o.VALUE as FLOAT) IS NOT NULL GROUP BY CASE WHEN DATEDIFF(year, p.BIRTHDATE, GETDATE()) < 18 THEN 'Under 18' WHEN DATEDIFF(year, p.BIRTHDATE, GETDATE()) BETWEEN 18 AND 39 THEN '18-39' WHEN DATEDIFF(year, p.BIRTHDATE, GETDATE()) BETWEEN 40 AND 64 THEN '40-64' ELSE '65+' END ORDER BY age_group
 """
 
 
 class QueryEngine:
-    """Orchestrates the complete NL-to-SQL pipeline."""
+    """Orchestrates the complete NL-to-SQL pipeline with all Day 3 features."""
 
     MAX_RETRIES = 3
 
@@ -145,6 +157,9 @@ class QueryEngine:
         self.sql_validator = SQLValidator()
         self.sql_rewriter = SQLRewriter()
         self.content_safety = ContentSafetyService()
+        self.sensitivity_classifier = SensitivityClassifier()
+        self.conversation_manager = ConversationManager()
+        self.bias_detector = BiasDetector()
         self.client = get_openai_client()
         self.model = settings.model_name
 
@@ -153,20 +168,14 @@ class QueryEngine:
         question: str,
         user_external_id: str,
         impersonated_by: str = None,
-        conversation_history: list[dict] = None,
     ) -> QueryResult:
-        """
-        Full pipeline execution. This is the single entry point called
-        by the query router.
-        """
         result = QueryResult()
         start_time = time.time()
 
-        # —— Step 1: Load RBAC context ———————————————————————
+        # -- 1. Load RBAC context -----------------------------
         try:
             role_ctx = self.rbac_service.get_role_context(
-                user_external_id,
-                impersonated_by=impersonated_by,
+                user_external_id, impersonated_by=impersonated_by
             )
         except ValueError as e:
             result.was_denied = True
@@ -179,7 +188,7 @@ class QueryEngine:
         result.role_name = role_ctx.role_name
         result.access_scope = role_ctx.row_scope
 
-        # —— Step 2: Content Safety screening ——————————————————
+        # -- 2. Content Safety screening ----------------------
         safety = self.content_safety.screen_input(question)
         result.content_safety_scores = safety.scores
 
@@ -195,8 +204,27 @@ class QueryEngine:
             await self._log_audit(result, role_ctx, question)
             return result
 
-        # —— Step 3: Generate SQL (with retry loop) ————————————
+        # -- 3. Sensitivity classification --------------------
+        sensitivity = self.sensitivity_classifier.classify(question, role_ctx)
+        result.sensitivity_level = sensitivity.level
+        result.sensitivity_reason = sensitivity.reason
+        result.sensitivity_advisory = sensitivity.advisory
+
+        if sensitivity.should_block:
+            result.was_denied = True
+            result.denial_reason = f"Sensitivity: {sensitivity.reason}"
+            result.answer = sensitivity.advisory
+            result.confidence = "denied"
+            result.execution_time_ms = int((time.time() - start_time) * 1000)
+            result.suggestions = self.conversation_manager.generate_suggestions(
+                user_external_id, role_ctx
+            )
+            await self._log_audit(result, role_ctx, question)
+            return result
+
+        # -- 4. Generate SQL (with conversation context + retry)
         system_prompt = self._build_system_prompt(role_ctx)
+        conversation_history = self.conversation_manager.get_history(user_external_id)
         generated_sql = ""
         validation = None
         last_error = ""
@@ -211,16 +239,14 @@ class QueryEngine:
             )
             result.generated_sql = generated_sql
 
-            # —— Step 4: Validate SQL ——————————————————————————
+            # -- 5. Validate SQL ------------------------------
             validation = self.sql_validator.validate(generated_sql, role_ctx)
 
             if validation.is_valid:
                 break
 
-            # Feed error back to LLM for self-correction
             last_error = "; ".join(validation.violations)
 
-        # If still invalid after all retries, deny
         if not validation.is_valid:
             result.was_denied = True
             result.denial_reason = "; ".join(validation.violations)
@@ -232,13 +258,16 @@ class QueryEngine:
             )
             result.confidence = "denied"
             result.execution_time_ms = int((time.time() - start_time) * 1000)
+            result.suggestions = self.conversation_manager.generate_suggestions(
+                user_external_id, role_ctx
+            )
             await self._log_audit(result, role_ctx, question)
             return result
 
         result.tables_accessed = validation.tables_accessed
         result.warnings = validation.warnings
 
-        # —— Step 5: Rewrite SQL with RBAC filters —————————————
+        # -- 6. Rewrite SQL with RBAC filters -----------------
         rewritten_sql, rewrite_explanation = self.sql_rewriter.rewrite(
             validation.sql, role_ctx
         )
@@ -246,54 +275,76 @@ class QueryEngine:
         result.was_modified = rewritten_sql != validation.sql
         result.modification_explanation = rewrite_explanation
 
-        # —— Step 6: Execute against read-only DB ——————————————
+        # -- 7. Execute against read-only DB ------------------
         try:
             rows, columns = self._execute_sql(rewritten_sql)
             result.raw_results = rows
             result.result_columns = columns
             result.row_count = len(rows)
         except Exception as e:
-            error_msg = str(e)[:300]
-            result.answer = (
-                f"The query executed but returned an error: {error_msg}. "
-                f"This may be due to a data type mismatch or timeout."
-            )
+            result.answer = f"Query execution error: {str(e)[:300]}"
             result.confidence = "low"
             result.execution_time_ms = int((time.time() - start_time) * 1000)
             await self._log_audit(result, role_ctx, question)
             return result
 
-        # —— Step 7: Generate explanation ——————————————————————
+        # -- 8. Bias detection --------------------------------
+        bias = self.bias_detector.check_results(columns, rows)
+        if bias and bias.has_disparity:
+            result.bias_alert = bias.message
+            result.warnings.append(bias.message)
+
+        # -- 9. Generate explanation --------------------------
         result.answer = self._generate_explanation(
             question, generated_sql, rows, columns, role_ctx
         )
 
-        # —— Step 8: Screen output —————————————————————————————
+        # Append sensitivity advisory if amber
+        if sensitivity.level == "amber" and sensitivity.advisory:
+            result.answer += f"\n\n{sensitivity.advisory}"
+
+        # -- 10. Screen output --------------------------------
         output_safety = self.content_safety.screen_output(result.answer)
         if not output_safety.is_safe:
             result.answer = (
                 "The generated response was flagged by content safety. "
-                "The query returned data, but the explanation could not be displayed. "
-                "Please try rephrasing your question."
+                "The query returned data, but the explanation cannot be displayed."
             )
 
-        # —— Step 9: Generate visualization spec ———————————————
+        # -- 11. Visualization --------------------------------
         if result.row_count > 0 and result.row_count <= 100:
             result.visualization = self._generate_visualization(
                 question, rows, columns
             )
 
+        # -- 12. Generate follow-up suggestions ---------------
+        self.conversation_manager.add_entry(
+            user_id=user_external_id,
+            question=question,
+            sql=generated_sql,
+            answer=result.answer[:200],
+            role_name=role_ctx.role_name,
+            row_count=result.row_count,
+        )
+        result.suggestions = self.conversation_manager.generate_suggestions(
+            user_external_id, role_ctx
+        )
+
         result.confidence = "high" if result.row_count > 0 else "medium"
         result.execution_time_ms = int((time.time() - start_time) * 1000)
 
+        # -- 13. Audit log ------------------------------------
         await self._log_audit(result, role_ctx, question)
         return result
 
+    def clear_conversation(self, user_external_id: str):
+        """Clear conversation history for a user (called on role switch)."""
+        self.conversation_manager.clear(user_external_id)
+
     def _build_system_prompt(self, role_ctx: RoleContext) -> str:
-        """Build the full system prompt with schema + role constraints."""
         return f"""You are an expert T-SQL analytics engineer for a healthcare system.
-You convert natural language questions into safe, correct T-SQL queries
-executed against Azure SQL Database containing synthetic patient data (Synthea).
+Convert natural language questions into safe, correct T-SQL queries for Azure SQL Database
+containing synthetic patient data (Synthea).
 
 {SCHEMA_DESCRIPTION}
 
@@ -302,111 +353,66 @@ executed against Azure SQL Database containing synthetic patient data (Synthea).
 {FEW_SHOT_EXAMPLES}
 
 ## RULES
-1. Return ONLY the raw SQL query. No markdown backticks, no explanation, no preamble.
-2. Use T-SQL syntax (TOP instead of LIMIT, GETDATE(), DATEDIFF, TRY_CAST, etc.)
-3. Always respect the access constraints above — they are mandatory, not suggestions.
-4. Use table aliases for readability (p for patients, e for encounters, c for conditions, etc.)
-5. If the question requires data outside the user's access, return a SQL comment explaining why.
-6. Use TOP 500 unless the user specifies a different limit.
-7. For observations.VALUE, always use TRY_CAST(VALUE as FLOAT) since VALUE is NVARCHAR.
-8. Use LIKE with wildcards for condition/medication name matching (e.g., '%iabetes%').
+1. Return ONLY the raw SQL query. No markdown backticks, no explanation.
+2. Use T-SQL syntax (TOP not LIMIT, GETDATE(), DATEDIFF, TRY_CAST).
+3. Always respect access constraints -- they are mandatory.
+4. Use table aliases (p=patients, e=encounters, c=conditions, m=medications, o=observations).
+5. Use TOP 500 unless the user specifies a limit.
+6. For observations.VALUE, use TRY_CAST(VALUE as FLOAT).
+7. Use LIKE with wildcards for condition/medication matching.
+8. If the question is a follow-up referencing "that" or "those", use context from previous queries.
 """
 
-    def _generate_sql(
-        self,
-        question: str,
-        system_prompt: str,
-        conversation_history: list[dict] = None,
-        previous_error: str = None,
-    ) -> str:
-        """Call Azure OpenAI to generate SQL."""
+    def _generate_sql(self, question, system_prompt, conversation_history=None, previous_error=None):
         messages = [{"role": "system", "content": system_prompt}]
 
-        # Add conversation history for follow-up questions
         if conversation_history:
             for entry in conversation_history[-5:]:
                 messages.append({"role": "user", "content": entry.get("question", "")})
                 if entry.get("sql"):
                     messages.append({"role": "assistant", "content": entry["sql"]})
 
-        # If retrying, include the error context
         if previous_error:
             messages.append({
                 "role": "user",
-                "content": (
-                    f"The previous SQL had errors: {previous_error}\n"
-                    f"Please fix the query for this question: {question}"
-                ),
+                "content": f"Previous SQL had errors: {previous_error}\nFix the query for: {question}",
             })
         else:
             messages.append({"role": "user", "content": question})
 
         try:
             response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=0,
-                max_tokens=1000,
+                model=self.model, messages=messages,
+                temperature=0, max_tokens=1000,
             )
             sql = response.choices[0].message.content.strip()
-
-            # Strip markdown code fences if the LLM added them despite instructions
             if sql.startswith("```"):
-                lines = sql.split("\n")
-                sql = "\n".join(
-                    l for l in lines if not l.strip().startswith("```")
-                ).strip()
-
+                sql = "\n".join(l for l in sql.split("\n") if not l.strip().startswith("```")).strip()
             return sql
-
         except Exception as e:
             return f"-- LLM Error: {str(e)[:200]}"
 
-    def _execute_sql(self, sql: str) -> tuple[list[list], list[str]]:
-        """
-        Execute SQL against the read-only database connection.
-        Returns (rows, column_names).
-        Uses q2i_readonly user — even if the SQL contains mutations,
-        the database rejects them (defense-in-depth Layer 4).
-        """
-        conn_string = settings.sql_readonly_connection_string
-        if not conn_string:
-            conn_string = settings.sql_connection_string
-
+    def _execute_sql(self, sql):
+        conn_string = settings.sql_readonly_connection_string or settings.sql_connection_string
         conn = pyodbc.connect(conn_string, timeout=30)
         cursor = conn.cursor()
-
         try:
             cursor.execute(sql)
             columns = [desc[0] for desc in cursor.description] if cursor.description else []
-            rows = []
-            for row in cursor.fetchmany(500):  # Hard cap at 500 rows
-                rows.append([
-                    str(val) if val is not None else None
-                    for val in row
-                ])
+            rows = [[str(val) if val is not None else None for val in row] for row in cursor.fetchmany(500)]
             return rows, columns
         finally:
             cursor.close()
             conn.close()
 
-    def _generate_explanation(
-        self,
-        question: str,
-        sql: str,
-        rows: list[list],
-        columns: list[str],
-        role_ctx: RoleContext,
-    ) -> str:
-        """Call Azure OpenAI to explain query results in plain language."""
+    def _generate_explanation(self, question, sql, rows, columns, role_ctx):
         if not rows:
             return (
-                f"The query returned no results. This could mean the data doesn't "
-                f"exist in the database, or your access level ({role_ctx.role_name}) "
-                f"may have filtered it out."
+                f"The query returned no results. Your access level ({role_ctx.role_name}, "
+                f"{role_ctx.row_scope} scope) may have filtered out the matching data, "
+                f"or the data may not exist in the database."
             )
 
-        # Truncate results for the prompt to save tokens
         sample = rows[:20]
         result_text = f"Columns: {', '.join(columns)}\n"
         for row in sample:
@@ -418,97 +424,52 @@ executed against Azure SQL Database containing synthetic patient data (Synthea).
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a healthcare data analyst. Explain SQL query results "
-                            "in clear, concise business language. Highlight key findings, "
-                            "trends, and notable values. Use specific numbers from the data. "
-                            "Keep the explanation to 2-4 sentences."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Question: {question}\n"
-                            f"SQL: {sql}\n"
-                            f"Results:\n{result_text}\n"
-                            f"User role: {role_ctx.role_name} ({role_ctx.row_scope} scope)\n"
-                            f"Explain these results."
-                        ),
-                    },
+                    {"role": "system", "content": (
+                        "You are a healthcare data analyst. Explain SQL query results "
+                        "in clear, concise business language. Highlight key findings "
+                        "and notable values. Use specific numbers. Keep to 2-4 sentences."
+                    )},
+                    {"role": "user", "content": (
+                        f"Question: {question}\nSQL: {sql}\n"
+                        f"Results:\n{result_text}\n"
+                        f"User: {role_ctx.display_name} ({role_ctx.role_name})\n"
+                        f"Explain these results."
+                    )},
                 ],
-                temperature=0.3,
-                max_tokens=300,
+                temperature=0.3, max_tokens=300,
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
-            return f"Query returned {len(rows)} rows but explanation generation failed: {str(e)[:100]}"
+            return f"Query returned {len(rows)} rows. (Explanation unavailable: {str(e)[:100]})"
 
-    def _generate_visualization(
-        self,
-        question: str,
-        rows: list[list],
-        columns: list[str],
-    ) -> Optional[dict]:
-        """
-        Ask the LLM to recommend a chart type and format data for Recharts.
-        Returns a JSON spec the frontend can render directly.
-        """
+    def _generate_visualization(self, question, rows, columns):
         if len(columns) < 2 or len(rows) < 2:
             return None
 
-        sample = rows[:30]
-        data_preview = f"Columns: {json.dumps(columns)}\n"
-        data_preview += f"First rows: {json.dumps(sample[:5])}\n"
-        data_preview += f"Total rows: {len(rows)}"
+        data_preview = f"Columns: {json.dumps(columns)}\nFirst rows: {json.dumps(rows[:5])}\nTotal: {len(rows)}"
 
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a data visualization expert. Given query results, "
-                            "return ONLY a JSON object (no markdown, no explanation) with:\n"
-                            '{"chartType": "bar"|"line"|"pie"|"scatter"|"table",\n'
-                            ' "xKey": "column_name_for_x_axis",\n'
-                            ' "yKey": "column_name_for_y_axis",\n'
-                            ' "title": "Chart title",\n'
-                            ' "data": [{...}, ...] }\n'
-                            "Rules: bar for categories+counts, line for time series, "
-                            "pie for proportions (<=8 slices), scatter for two numeric columns, "
-                            "table if nothing fits well. data should use the actual column names as keys."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Question: {question}\n{data_preview}",
-                    },
+                    {"role": "system", "content": (
+                        "Data viz expert. Return ONLY JSON (no markdown):\n"
+                        '{"chartType":"bar"|"line"|"pie"|"scatter"|"table",'
+                        '"xKey":"col","yKey":"col","title":"title","data":[{...}]}\n'
+                        "bar=categories+counts, line=time, pie=proportions(<=8), scatter=2 numerics."
+                    )},
+                    {"role": "user", "content": f"Question: {question}\n{data_preview}"},
                 ],
-                temperature=0,
-                max_tokens=2000,
+                temperature=0, max_tokens=2000,
             )
-
             text = response.choices[0].message.content.strip()
             if text.startswith("```"):
-                text = "\n".join(
-                    l for l in text.split("\n") if not l.strip().startswith("```")
-                ).strip()
-
+                text = "\n".join(l for l in text.split("\n") if not l.strip().startswith("```")).strip()
             return json.loads(text)
         except Exception:
-            # Visualization is nice-to-have — don't break the pipeline
             return None
 
-    async def _log_audit(
-        self,
-        result: QueryResult,
-        role_ctx: RoleContext,
-        question: str,
-    ):
-        """Write the query attempt to the audit log table."""
+    async def _log_audit(self, result, role_ctx, question):
         try:
             conn = pyodbc.connect(settings.sql_connection_string)
             cursor = conn.cursor()
@@ -520,23 +481,17 @@ executed against Azure SQL Database containing synthetic patient data (Synthea).
                      content_safety_score, sensitivity_classification)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                role_ctx.user_id,
-                role_ctx.role_name,
-                question,
-                result.generated_sql,
-                result.executed_sql,
-                result.was_modified,
-                result.was_denied,
+                role_ctx.user_id, role_ctx.role_name, question,
+                result.generated_sql, result.executed_sql,
+                result.was_modified, result.was_denied,
                 result.denial_reason[:500] if result.denial_reason else None,
-                ", ".join(result.tables_accessed),
-                result.row_count,
+                ", ".join(result.tables_accessed), result.row_count,
                 result.execution_time_ms,
                 json.dumps(result.content_safety_scores),
-                role_ctx.sensitivity_tier,
+                result.sensitivity_level,
             ))
             conn.commit()
             cursor.close()
             conn.close()
         except Exception as e:
-            # Audit logging should never break the pipeline
-            print(f"⚠ Audit log failed: {e}")
+            print(f"Audit log: {e}")

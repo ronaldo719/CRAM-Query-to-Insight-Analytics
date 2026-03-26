@@ -1,13 +1,14 @@
 """
-Query Router — The main API endpoint for natural language queries.
+Query Router -- Day 3: Full pipeline with conversation + suggestions.
 
-Now fully wired to the Day 2 pipeline:
-  JWT auth → RBAC context → Content Safety → SQL generation →
-  sqlglot validation → RBAC rewriting → execution → explanation → audit
+New response fields:
+  + sensitivity_level / sensitivity_advisory -- green/amber/red badge
+  + bias_alert -- demographic disparity warning
+  + suggestions -- 3 proactive follow-up questions
+  + result_columns / result_rows -- data for frontend table rendering
 
-Admin impersonation is handled transparently by the auth dependency.
-The `user` dict contains the effective user's identity — either the
-logged-in user or the impersonated user if the admin set X-Impersonate.
+New endpoints:
+  + POST /api/query/clear-history -- reset conversation memory (on role switch)
 """
 
 from fastapi import APIRouter, Depends
@@ -18,16 +19,11 @@ from app.dependencies.auth import get_current_user
 from app.services.query_engine import QueryEngine
 
 router = APIRouter()
-
-# Single QueryEngine instance shared across all requests
 engine = QueryEngine()
 
 
-# —— Request / Response models ———————————————————————————————
-
 class QueryRequest(BaseModel):
     question: str
-    conversation_history: Optional[list[dict]] = None
 
 
 class QueryResponse(BaseModel):
@@ -48,12 +44,18 @@ class QueryResponse(BaseModel):
     execution_time_ms: int
     confidence: str
 
+    # Day 3: Responsible AI
+    sensitivity_level: str = "green"
+    sensitivity_advisory: str = ""
+    bias_alert: Optional[str] = None
+
+    # Day 3: Innovation
+    suggestions: list[str] = []
+
     # Data for frontend table rendering
     result_columns: list[str] = []
     result_rows: list[list] = []
 
-
-# —— POST /api/query/ask ————————————————————————————————————
 
 @router.post("/ask", response_model=QueryResponse)
 async def ask_question(
@@ -61,13 +63,9 @@ async def ask_question(
     user: dict = Depends(get_current_user),
 ):
     """
-    Accept a natural language question and run the full NL-to-SQL pipeline.
-
-    The user's identity comes from the JWT token (or admin impersonation).
-    Their role determines what data they can access — the same question
-    produces different results depending on who's asking.
+    Full NL-to-SQL pipeline with RBAC, Content Safety, sensitivity
+    classification, bias detection, and proactive suggestions.
     """
-    # The effective user is either the actual user or the impersonated user
     effective_user_id = user.get("external_id")
     impersonated_by = user.get("impersonated_by")
 
@@ -75,7 +73,6 @@ async def ask_question(
         question=request.question,
         user_external_id=effective_user_id,
         impersonated_by=impersonated_by,
-        conversation_history=request.conversation_history,
     )
 
     return QueryResponse(
@@ -92,29 +89,42 @@ async def ask_question(
         row_count=result.row_count,
         execution_time_ms=result.execution_time_ms,
         confidence=result.confidence,
+        sensitivity_level=result.sensitivity_level,
+        sensitivity_advisory=result.sensitivity_advisory,
+        bias_alert=result.bias_alert,
+        suggestions=result.suggestions,
         result_columns=result.result_columns,
-        result_rows=result.raw_results[:100],  # Cap at 100 rows for frontend
+        result_rows=result.raw_results[:100],
     )
 
 
-# —— GET /api/query/roles ———————————————————————————————————
-# Kept for backwards compatibility — the frontend's impersonation
-# dropdown now uses /api/auth/users instead, but this endpoint
-# is still useful for unauthenticated role discovery.
+@router.post("/clear-history")
+async def clear_conversation_history(
+    user: dict = Depends(get_current_user),
+):
+    """
+    Clear conversation memory for the current user.
+    Called by the frontend when the admin switches impersonation targets,
+    so follow-up questions don't leak context between roles.
+    """
+    effective_user_id = user.get("external_id")
+    engine.clear_conversation(effective_user_id)
+    return {"message": "Conversation history cleared"}
+
 
 @router.get("/roles")
 async def get_roles():
     return {
         "roles": [
             {"id": "demo_doctor", "label": "Dr. Sarah Chen", "icon": "stethoscope",
-             "description": "Physician — sees own patients, full clinical data"},
+             "description": "Physician -- sees own patients, full clinical data"},
             {"id": "demo_nurse", "label": "James Rodriguez, RN", "icon": "heart-pulse",
-             "description": "Nurse — department patients, clinical data, no billing"},
+             "description": "Nurse -- department patients, clinical data, no billing"},
             {"id": "demo_billing", "label": "Maria Thompson", "icon": "receipt",
-             "description": "Billing — all patients, financial data only, no clinical"},
+             "description": "Billing -- all patients, financial data only"},
             {"id": "demo_researcher", "label": "Dr. Alex Kumar", "icon": "microscope",
-             "description": "Researcher — aggregate data only, no PII"},
+             "description": "Researcher -- aggregate data only, no PII"},
             {"id": "demo_admin", "label": "System Admin", "icon": "shield",
-             "description": "Admin — full access to all data"},
+             "description": "Admin -- full access to all data"},
         ]
     }
