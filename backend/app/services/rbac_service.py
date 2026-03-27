@@ -88,6 +88,19 @@ class RoleContext:
         lines.append("If the question requires a table NOT in this list, explain the limitation.")
         lines.append("")
 
+        # Billing role: explicitly refuse clinical queries
+        if self.role_name == "billing":
+            lines.append("### CRITICAL: FINANCIAL ROLE ONLY")
+            lines.append("You are a FINANCIAL/BILLING role. You may ONLY answer questions about")
+            lines.append("costs, charges, payments, claims, payers, insurance, and financial metrics.")
+            lines.append("Do NOT attempt to answer questions about medical conditions, diagnoses,")
+            lines.append("medications, procedures, observations, lab results, vital signs, allergies,")
+            lines.append("immunizations, or any clinical/medical topics — even if you could search")
+            lines.append("for clinical terms in allowed tables like encounters or claims.")
+            lines.append("If the user asks a clinical question, respond ONLY with:")
+            lines.append("DENY: Billing role does not have access to clinical data.")
+            lines.append("")
+
         # Column-level constraints
         if self.denied_columns:
             lines.append("### DENIED COLUMNS — NEVER reference these")

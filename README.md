@@ -5,19 +5,23 @@ An agentic analytics engineer that converts natural language questions into vali
 
 ---
 
-## Day 3 — Complete Build
+## Day 4 — Production-Quality Frontend + Billing Clinical Guard
 
 ### What's Built
 
 **14-Step NL-to-SQL Pipeline** — A single `POST /api/query/ask` call runs:
 
 ```
-JWT auth → RBAC context → Content Safety → Sensitivity classification →
-SQL generation (with conversation context) → sqlglot validation (3× retry) →
-RBAC rewriting → execution → Bias detection → explanation →
-Output safety → visualization → Follow-up suggestions →
-Conversation storage → Audit log
+JWT auth → RBAC context → Billing clinical guard → Content Safety →
+Sensitivity classification → SQL generation (with conversation context) →
+sqlglot validation (3× retry) → RBAC rewriting → execution →
+Bias detection → explanation → Output safety → visualization →
+Follow-up suggestions → Conversation storage → Audit log
 ```
+
+**Production Frontend** — Polished component-based UI with auto-visualization (Recharts), sortable data tables, RAI status banner, and admin audit dashboard.
+
+**Billing Clinical Guard** — Regex keyword detection + LLM prompt constraints deny clinical queries for billing role before SQL generation, preventing workarounds via allowed tables.
 
 ### Responsible AI Features (6 Microsoft Principles)
 
@@ -39,6 +43,8 @@ Conversation storage → Audit log
 | **Bias detection** | Scans results for demographic dimensions + outcome measures; flags disparities |
 | **Sensitivity classification** | Two-tier (rule-based + LLM) query classification before SQL generation |
 | **Audit dashboard** | Admin panel with total queries, denial rate, RBAC modifications, latency stats |
+| **Auto-visualization** | LLM-generated chart specs rendered as bar, line, pie, or scatter charts via Recharts |
+| **Billing clinical guard** | Regex keyword + LLM prompt deny clinical queries for billing role pre-SQL-generation |
 
 ---
 
@@ -76,11 +82,16 @@ CRAM-Query-to-Insight-Analytics/
 │   └── test_openai.py
 ├── frontend/
 │   ├── src/
-│   │   ├── App.tsx                          # Full Day 3 UI with all panels
+│   │   ├── App.tsx                          # Polished layout with all components
 │   │   ├── AuthContext.tsx                  # Session state, authFetch, impersonation
 │   │   ├── LoginPage.tsx                    # Login form + demo quick-login
 │   │   ├── main.jsx
-│   │   └── index.css
+│   │   ├── index.css                        # Global styles, keyframes, scrollbar
+│   │   └── components/
+│   │       ├── ChartRenderer.tsx            # Recharts auto-visualization engine
+│   │       ├── ResultsTable.tsx             # Sortable data table
+│   │       ├── RAIBanner.tsx                # Responsible AI status bar
+│   │       └── AuditDashboard.tsx           # Admin audit statistics panel
 │   ├── tsconfig.json
 │   └── package.json
 ├── .env                                     # gitignored — secrets
@@ -100,6 +111,11 @@ CRAM-Query-to-Insight-Analytics/
                     ┌──────────────────▼──────────────────────────┐
                     │  1. Load RBAC Context                       │
                     │  app_users → app_roles → column_access      │
+                    └──────────────────┬──────────────────────────┘
+                                       │
+                    ┌──────────────────▼──────────────────────────┐
+                    │  1b. Billing Clinical Guard                 │
+                    │  Deny clinical queries for billing role     │
                     └──────────────────┬──────────────────────────┘
                                        │
                     ┌──────────────────▼──────────────────────────┐
@@ -282,7 +298,7 @@ Azure AI Content Safety screens text at **two points**:
 | 5 | **Bias detection** | "Compare average healthcare costs by race" | AMBER + fairness notice | ✅ 95% disparity flagged |
 | 6 | **Audit dashboard** | Admin clicks "Show audit log" | Stats panel renders | ✅ Total queries, denial rate, by-role breakdown |
 | 7 | **Physician RBAC** | Doctor: "How many patients by gender?" | Own patients only | ✅ 6 patients (4F, 2M), provider filter applied |
-| 8 | **Billing denied** | Billing: "Patients with diabetes and medications" | Clinical tables blocked | ✅ `conditions` and `medications` denied |
+| 8 | **Billing denied** | Billing: "Show me patients with diabetes" | Clinical query blocked pre-SQL | ✅ RED/denied immediately, no SQL generated |
 | 9 | **Researcher k-anonymity** | Researcher: "Count conditions by type" | Aggregate + HAVING | ✅ k-anonymity enforced |
 
 ---
@@ -333,7 +349,7 @@ Admin can act as any user via `X-Impersonate` header. The auth dependency loads 
 |------|-------------|----------------|----------------|-----|
 | **Physician** | own_patients | All clinical + financial | — | Yes |
 | **Nurse** | department | Clinical tables only | Cost columns | No |
-| **Billing** | all | Financial + patients + encounters | Clinical tables blocked | No |
+| **Billing** | all | Financial + patients + encounters | Clinical tables blocked; clinical queries denied via keyword guard + LLM prompt | No |
 | **Researcher** | aggregate_only | All clinical + financial | PII columns | No |
 | **Admin** | all | All tables | — | Yes |
 
@@ -353,11 +369,12 @@ The `RoleContext` flows through every pipeline step:
 | **Layer 1: Authentication** | JWT in httpOnly cookie, bcrypt passwords |
 | **Layer 2: Content Safety** | Azure AI screens input before LLM and output after LLM |
 | **Layer 3: Sensitivity Gate** | RED queries blocked before SQL generation even starts |
-| **Layer 4: LLM Prompt** | Role constraints injected into system prompt as mandatory rules |
-| **Layer 5: SQL Validation** | sqlglot AST parsing blocks mutations, system tables, denied columns |
-| **Layer 6: SQL Rewriting** | Unconditional RBAC filter injection — bypasses prompt injection |
-| **Layer 7: Read-only DB** | `q2i_readonly` user has only `db_datareader` — mutations rejected at DB level |
-| **Layer 8: Audit Logging** | Every query attempt logged with user, role, SQL, timing, safety scores |
+| **Layer 4: Billing Clinical Guard** | Regex keyword detection denies clinical queries for billing role pre-SQL-generation |
+| **Layer 5: LLM Prompt** | Role constraints injected into system prompt as mandatory rules; billing gets explicit financial-only instructions |
+| **Layer 6: SQL Validation** | sqlglot AST parsing blocks mutations, system tables, denied columns |
+| **Layer 7: SQL Rewriting** | Unconditional RBAC filter injection — bypasses prompt injection |
+| **Layer 8: Read-only DB** | `q2i_readonly` user has only `db_datareader` — mutations rejected at DB level |
+| **Layer 9: Audit Logging** | Every query attempt logged with user, role, SQL, timing, safety scores |
 
 ---
 
@@ -423,14 +440,34 @@ JWT_SECRET_KEY=...   # generate: python3 -c "import secrets; print(secrets.token
 
 ---
 
+## Frontend Components (Day 4)
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| **ChartRenderer** | `components/ChartRenderer.tsx` | Renders Recharts bar/line/pie/scatter from backend JSON spec; converts string values to numbers |
+| **ResultsTable** | `components/ResultsTable.tsx` | Sortable data table with smart numeric/string sort, sticky headers, 50-row cap |
+| **RAIBanner** | `components/RAIBanner.tsx` | Horizontal status bar: sensitivity dot, confidence pill, role/scope, timing, RBAC/impersonation flags |
+| **AuditDashboard** | `components/AuditDashboard.tsx` | Admin panel: total queries, denial rate, RBAC mods, latency, role breakdown, recent denials |
+
+### UI Layout Order (per query result)
+1. RAI Banner (first thing visible — Responsible AI at a glance)
+2. Answer card (natural language explanation)
+3. Bias alert / sensitivity advisory (if applicable)
+4. Visualization chart (auto-generated bar/line/pie/scatter)
+5. Results table (sortable raw data)
+6. SQL transparency (collapsed by default, expandable)
+7. Warnings
+
+---
+
 ## Scoring Alignment
 
 | Criteria (25% each) | Coverage |
 |---------------------|----------|
 | **Responsible AI** | Sensitivity classifier (Privacy & Security), bias detector (Fairness), audit log (Accountability), content safety (Reliability & Safety), SQL transparency (Transparency), RBAC (Inclusiveness) |
-| **Innovation** | Conversational memory with follow-ups, proactive suggestion chips, bias detection, two-tier sensitivity classification |
+| **Innovation** | Conversational memory with follow-ups, proactive suggestion chips, bias detection, two-tier sensitivity classification, auto-visualization engine, billing clinical guard |
 | **Azure Services** | SQL Database, OpenAI, Content Safety, Key Vault, App Insights, Log Analytics |
-| **Functionality** | 14-step pipeline, 5 distinct roles, 8-layer SQL validation, defense-in-depth security |
+| **Functionality** | 14-step pipeline, 5 distinct roles, 8-layer SQL validation, 9-layer defense-in-depth security, auto-visualization, sortable tables, RAI status bar |
 
 ---
 

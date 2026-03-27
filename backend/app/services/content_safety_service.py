@@ -30,13 +30,11 @@ class SafetyResult:
 
 class ContentSafetyService:
 
-    # Severity threshold — block if any category hits this level or higher
-    # 0=safe, 2=low, 4=medium, 6=high. Threshold of 2 is fairly strict.
-    SEVERITY_THRESHOLD = 2
-
     def __init__(self):
         self.endpoint = settings.content_safety_endpoint
         self.key = settings.content_safety_key
+        # 0=safe, 2=low, 4=medium, 6=high. Configured via CONTENT_SAFETY_THRESHOLD in .env.
+        self.severity_threshold = settings.content_safety_threshold
         self._client = None
 
     def _get_client(self):
@@ -86,7 +84,7 @@ class ContentSafetyService:
                 severity = result.severity
                 scores[category] = severity
 
-                if severity >= self.SEVERITY_THRESHOLD:
+                if severity >= self.severity_threshold:
                     blocked.append(f"{category} (severity: {severity})")
 
             is_safe = len(blocked) == 0

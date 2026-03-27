@@ -25,6 +25,7 @@ Pipeline order:
   14. Audit log
 """
 
+import re
 import time
 import json
 import pyodbc
@@ -188,6 +189,25 @@ class QueryEngine:
         result.role_name = role_ctx.role_name
         result.access_scope = role_ctx.row_scope
 
+        # -- 1b. Billing clinical query guard -----------------
+        if role_ctx.role_name == "billing" and self._is_clinical_query(question):
+            result.was_denied = True
+            result.denial_reason = "Clinical query not permitted for billing role"
+            result.answer = (
+                "This question involves clinical data (diagnoses, medications, procedures, etc.) "
+                "which is not accessible to the billing role. Billing access is limited to "
+                "financial data such as claims, costs, payments, and payer information. "
+                "Please contact a clinical role (physician, nurse) for medical queries."
+            )
+            result.confidence = "denied"
+            result.sensitivity_level = "red"
+            result.execution_time_ms = int((time.time() - start_time) * 1000)
+            result.suggestions = self.conversation_manager.generate_suggestions(
+                user_external_id, role_ctx
+            )
+            await self._log_audit(result, role_ctx, question)
+            return result
+
         # -- 2. Content Safety screening ----------------------
         safety = self.content_safety.screen_input(question)
         result.content_safety_scores = safety.scores
@@ -341,6 +361,29 @@ class QueryEngine:
         """Clear conversation history for a user (called on role switch)."""
         self.conversation_manager.clear(user_external_id)
 
+    # Clinical terms that indicate non-financial intent
+    _CLINICAL_KEYWORDS = re.compile(
+        r"\b("
+        r"condition|conditions|diagnosis|diagnoses|diagnosed|"
+        r"medication|medications|drug|drugs|prescription|prescriptions|"
+        r"procedure|procedures|surgery|surgeries|"
+        r"observation|observations|vital|vitals|lab result|lab results|"
+        r"immunization|immunizations|vaccine|vaccines|vaccination|"
+        r"allergy|allergies|allergic|"
+        r"careplan|careplans|care plan|care plans|"
+        r"symptom|symptoms|clinical|"
+        r"blood pressure|heart rate|bmi|body mass|"
+        r"diabetes|diabetic|hypertension|asthma|cancer|infection|"
+        r"disease|disorder|syndrome|chronic|acute|"
+        r"treatment|treatments|therapy|therapies"
+        r")\b",
+        re.IGNORECASE,
+    )
+
+    def _is_clinical_query(self, question: str) -> bool:
+        """Check if a question is clinical in nature (for billing role guard)."""
+        return bool(self._CLINICAL_KEYWORDS.search(question))
+
     def _build_system_prompt(self, role_ctx: RoleContext) -> str:
         return f"""You are an expert T-SQL analytics engineer for a healthcare system.
 Convert natural language questions into safe, correct T-SQL queries for Azure SQL Database
@@ -388,6 +431,11 @@ containing synthetic patient data (Synthea).
             sql = response.choices[0].message.content.strip()
             if sql.startswith("```"):
                 sql = "\n".join(l for l in sql.split("\n") if not l.strip().startswith("```")).strip()
+            # Strip ANSI escape codes that some models emit
+            # Real ESC sequences (\x1b[...m)
+            sql = re.sub(r"\x1b\[[0-9;]*m", "", sql)
+            # Literal bracket codes ([0m, [4m, [1m etc.) — short codes only to avoid breaking T-SQL [identifiers]
+            sql = re.sub(r"\[(\d{1,2};)*\d{1,2}m", "", sql)
             return sql
         except Exception as e:
             return f"-- LLM Error: {str(e)[:200]}"

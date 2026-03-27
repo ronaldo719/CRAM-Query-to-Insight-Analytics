@@ -50,6 +50,7 @@ class Settings:
     # ── Azure Content Safety ──────────────────────────────────
     content_safety_endpoint: str = os.getenv("CONTENT_SAFETY_ENDPOINT", "")
     content_safety_key: str = os.getenv("CONTENT_SAFETY_KEY", "")
+    content_safety_threshold: int = int(os.getenv("CONTENT_SAFETY_THRESHOLD", "2"))
 
     # ── Application Insights ──────────────────────────────────
     appinsights_connection_string: str = os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING", "")

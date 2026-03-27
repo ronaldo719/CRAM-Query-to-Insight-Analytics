@@ -1,6 +1,10 @@
-import { useState, useEffect, useRef } from "react";
+import { useState } from "react";
 import { AuthProvider, useAuth } from "./AuthContext";
 import LoginPage from "./LoginPage";
+import ChartRenderer from "./components/ChartRenderer";
+import ResultsTable from "./components/ResultsTable";
+import RAIBanner from "./components/RAIBanner";
+import AuditDashboard from "./components/AuditDashboard";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -14,16 +18,12 @@ export default function App() {
 
 function AppContent() {
   const { user, isLoading } = useAuth();
-  if (isLoading) return (
-    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh", fontFamily: "Inter, system-ui, sans-serif", color: "#6b7280", fontSize: 14 }}>
-      Loading…
-    </div>
-  );
+  if (isLoading) return <div style={s.loadingPage}>Loading...</div>;
   if (!user) return <LoginPage />;
   return <QueryInterface />;
 }
 
-/* -- Types ---------------------------------------------------- */
+/* —— Types ———————————————————————————————————————————————————— */
 interface QueryResult {
   answer: string;
   visualization: any | null;
@@ -46,67 +46,40 @@ interface QueryResult {
   result_rows: (string | null)[][];
 }
 
-/* -- Role badge ----------------------------------------------- */
-function RoleBadge({ role }: { role: string }) {
-  const cls = ["doctor","nurse","billing","researcher","admin"].includes(role) ? role : "default";
-  return <span className={`cram-role-badge ${cls}`}>{role}</span>;
-}
-
-/* -- Initials from display name ------------------------------ */
-function initials(name: string) {
-  return name.split(" ").map(p => p[0]).join("").slice(0, 2).toUpperCase();
-}
-
-/* -- Prism SQL block ----------------------------------------- */
-function SqlBlock({ sql }: { sql: string }) {
-  const ref = useRef<HTMLElement>(null);
-  useEffect(() => {
-    if (ref.current && (window as any).Prism) {
-      (window as any).Prism.highlightElement(ref.current);
-    }
-  }, [sql]);
-  return (
-    <div className="cram-sql-block">
-      <pre className="language-sql" style={{ margin: 0 }}>
-        <code ref={ref} className="language-sql">{sql}</code>
-      </pre>
-    </div>
-  );
-}
-
-/* -- Main Interface ------------------------------------------- */
+/* —— Main Query Interface ———————————————————————————————————— */
 function QueryInterface() {
-  const { user, isAdmin, impersonating, impersonatableUsers, setImpersonating, authFetch, logout } = useAuth();
+  const {
+    user, isAdmin, impersonating, impersonatableUsers,
+    setImpersonating, authFetch, logout,
+  } = useAuth();
 
   const [question, setQuestion] = useState("");
   const [result, setResult] = useState<QueryResult | null>(null);
-  const [history, setHistory] = useState<{ question: string; result: QueryResult }[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showSql, setShowSql] = useState(false);
-  const [showTable, setShowTable] = useState(false);
   const [showAudit, setShowAudit] = useState(false);
-  const [auditData, setAuditData] = useState<any>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  const activeRole = impersonating
-    ? impersonatableUsers.find(u => u.external_id === impersonating)?.role_name
-    : user?.role_name;
+  const activeUser = impersonating
+    ? impersonatableUsers.find(u => u.external_id === impersonating)
+    : null;
+  const activeRole = activeUser?.role_name || user?.role_name || "";
+  const activeDisplayName = activeUser?.display_name || user?.display_name || "";
 
-  /* -- Clear conversation on role switch ---------------------- */
+  /* —— Role switch ——————————————————————————————————————————— */
   const handleRoleSwitch = async (externalId: string | null) => {
     setImpersonating(externalId);
     setResult(null);
-    setHistory([]);
+    setError(null);
     try {
       await authFetch(`${API_URL}/api/query/clear-history`, { method: "POST" });
     } catch { /* non-critical */ }
   };
 
-  /* -- Submit query ------------------------------------------- */
+  /* —— Submit ————————————————————————————————————————————————— */
   const handleSubmit = async (q?: string) => {
-    const queryText = q || question;
-    if (!queryText.trim()) return;
+    const text = q || question;
+    if (!text.trim()) return;
     setLoading(true);
     setError(null);
 
@@ -114,15 +87,13 @@ function QueryInterface() {
       const res = await authFetch(`${API_URL}/api/query/ask`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: queryText }),
+        body: JSON.stringify({ question: text }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || `HTTP ${res.status}`);
       }
-      const data: QueryResult = await res.json();
-      setResult(data);
-      setHistory(prev => [...prev, { question: queryText, result: data }]);
+      setResult(await res.json());
       setQuestion("");
     } catch (err: any) {
       setError(err.message);
@@ -131,386 +102,405 @@ function QueryInterface() {
     }
   };
 
-  /* -- Load audit stats --------------------------------------- */
-  const loadAudit = async () => {
-    try {
-      const res = await authFetch(`${API_URL}/api/audit/stats`);
-      if (res.ok) setAuditData(await res.json());
-    } catch { /* non-critical */ }
-  };
-
-  const SENS = {
-    green: { bg: "var(--sens-green-bg)", border: "var(--sens-green-border)", text: "var(--sens-green-text)", dot: "var(--sens-green-dot)" },
-    amber: { bg: "var(--sens-amber-bg)", border: "var(--sens-amber-border)", text: "var(--sens-amber-text)", dot: "var(--sens-amber-dot)" },
-    red:   { bg: "var(--sens-red-bg)",   border: "var(--sens-red-border)",   text: "var(--sens-red-text)",   dot: "var(--sens-red-dot)" },
-  } as Record<string, { bg: string; border: string; text: string; dot: string }>;
-
-  const sens = SENS[result?.sensitivity_level ?? ""] ?? SENS.green;
-
   return (
-    <div className="cram-root">
-
-      {/* ── Navbar ─────────────────────────────────────────────── */}
-      <nav className="cram-navbar">
-        {/* Logo zone — lines up with sidebar */}
-        <div className="cram-navbar-logo">
-          <button className="cram-sidebar-toggle" onClick={() => setSidebarOpen(o => !o)}>☰</button>
-          <div className="cram-navbar-mark">Q</div>
-          <span className="cram-navbar-brand">Query-to-Insight</span>
-        </div>
-
-        {/* Content zone */}
-        <div className="cram-navbar-content">
-          <span className="cram-navbar-title">Healthcare Analytics</span>
-          <div className="cram-navbar-spacer" />
-          <div className="cram-navbar-actions">
+    <div style={s.page}>
+      <div style={s.container}>
+        {/* —— Header ——————————————————————————————————————————— */}
+        <header style={s.header}>
+          <div>
+            <h1 style={s.title}>Query-to-Insight</h1>
+            <p style={s.subtitle}>Healthcare Analytics Engine</p>
+          </div>
+          <div style={s.headerRight}>
             {isAdmin && (
               <button
-                className="cram-nav-btn"
-                onClick={() => { setShowAudit(!showAudit); if (!auditData) loadAudit(); }}
+                onClick={() => setShowAudit(!showAudit)}
+                style={s.headerBtn}
               >
-                {showAudit ? "Hide" : "Show"} audit
+                {showAudit ? "Hide" : ""} Audit
               </button>
             )}
-            <RoleBadge role={activeRole ?? user?.role_name ?? ""} />
-            <span className="cram-navbar-name">{user?.display_name}</span>
-            <div className="cram-navbar-avatar" title={user?.display_name}>
-              {initials(user?.display_name ?? "U")}
+            <div style={s.userPill}>
+              <div style={s.userName}>{user?.display_name}</div>
+              <div style={s.userRole}>{user?.role_name}</div>
             </div>
-            <button className="cram-nav-btn-ghost" onClick={logout}>Sign out</button>
+            <button onClick={logout} style={s.logoutBtn}>Sign out</button>
+          </div>
+        </header>
+
+        {/* —— Admin impersonation ————————————————————————————— */}
+        {isAdmin && impersonatableUsers.length > 0 && (
+          <div style={s.impBar}>
+            <span style={s.impLabel}>Viewing as:</span>
+            <select
+              value={impersonating || ""}
+              onChange={e => handleRoleSwitch(e.target.value || null)}
+              style={s.impSelect}
+            >
+              <option value="">Myself — Admin (full access)</option>
+              {impersonatableUsers
+                .filter(u => u.external_id !== user?.external_id)
+                .map(u => (
+                  <option key={u.external_id} value={u.external_id}>
+                    {u.display_name} — {u.role_name} ({u.row_scope})
+                  </option>
+                ))}
+            </select>
+          </div>
+        )}
+
+        {/* —— Non-admin role badge ———————————————————————————— */}
+        {!isAdmin && (
+          <div style={s.roleBadge}>
+            <strong>{user?.display_name}</strong>
+            <span style={{ color: "#64748b", marginLeft: 8 }}>
+              {user?.role_name} — {(user as any)?.row_scope || "standard"}
+            </span>
+          </div>
+        )}
+
+        {/* —— Audit dashboard ————————————————————————————————— */}
+        {showAudit && <AuditDashboard />}
+
+        {/* —— Suggestion chips ———————————————————————————————— */}
+        {(result?.suggestions || []).length > 0 && (
+          <div style={s.suggestions}>
+            <span style={s.sugLabel}>Follow up:</span>
+            {result!.suggestions.map((q, i) => (
+              <button
+                key={i}
+                onClick={() => { setQuestion(q); handleSubmit(q); }}
+                style={s.sugChip}
+              >
+                {q}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* —— Query input ————————————————————————————————————— */}
+        <div style={s.inputRow}>
+          <div style={s.inputWrapper}>
+            <textarea
+              value={question}
+              onChange={e => setQuestion(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSubmit();
+                }
+              }}
+              placeholder={`Ask a question as ${activeDisplayName}...`}
+              style={s.textarea}
+              rows={2}
+            />
+            <button
+              onClick={() => handleSubmit()}
+              disabled={loading || !question.trim()}
+              style={{
+                ...s.submitBtn,
+                opacity: loading || !question.trim() ? 0.5 : 1,
+              }}
+            >
+              {loading ? (
+                <span style={s.spinner} />
+              ) : (
+                "Ask"
+              )}
+            </button>
           </div>
         </div>
-      </nav>
 
-      <div className="cram-shell">
-
-        {/* ── Dark sidebar ───────────────────────────────────────── */}
-        <aside className={`cram-sidebar${sidebarOpen ? " open" : ""}`}>
-          <nav className="cram-sidebar-nav">
-
-            {/* Static nav items */}
-            <span className="cram-sidebar-section-label">Workspace</span>
-            <button className="cram-sidebar-item active">
-              <span className="cram-sidebar-icon">💬</span>
-              Analytics Query
-            </button>
-
-            {isAdmin && (
-              <>
-                <div className="cram-sidebar-divider" />
-                <span className="cram-sidebar-section-label">Admin</span>
-
-                {/* Impersonation */}
-                <div className="cram-sidebar-inner">
-                  <div style={{ fontSize: 11, color: "var(--sidebar-text)", marginBottom: 4, fontWeight: 500 }}>Viewing as</div>
-                  {impersonatableUsers.length > 0 && (
-                    <select
-                      value={impersonating || ""}
-                      onChange={e => handleRoleSwitch(e.target.value || null)}
-                      className="cram-imp-select"
-                    >
-                      <option value="">Myself (Admin)</option>
-                      {impersonatableUsers.filter(u => u.external_id !== user?.external_id).map(u => (
-                        <option key={u.external_id} value={u.external_id}>{u.display_name} — {u.role_name}</option>
-                      ))}
-                    </select>
-                  )}
-                </div>
-              </>
-            )}
-
-            {/* Audit panel */}
-            {showAudit && auditData && (
-              <>
-                <div className="cram-sidebar-divider" />
-                <span className="cram-sidebar-section-label">Audit</span>
-                <div className="cram-sidebar-inner">
-                  <AuditPanel data={auditData} />
-                </div>
-              </>
-            )}
-
-            {/* History */}
-            {history.length > 1 && (
-              <>
-                <div className="cram-sidebar-divider" />
-                <span className="cram-sidebar-section-label">History</span>
-                <div className="cram-sidebar-inner">
-                  {history.slice(0, -1).reverse().map((entry, i) => (
-                    <div key={i} className="cram-sidebar-hist">
-                      <div className="cram-sidebar-hist-q">{entry.question}</div>
-                      <div className="cram-sidebar-hist-a">{entry.result.answer.slice(0, 80)}…</div>
-                    </div>
-                  ))}
-                </div>
-              </>
-            )}
-
-            {/* Access info */}
-            {result && (
-              <>
-                <div className="cram-sidebar-divider" />
-                <span className="cram-sidebar-section-label">Access</span>
-                <div className="cram-sidebar-inner">
-                  <div className="cram-sidebar-kv">
-                    <span className="cram-sidebar-kv-key">Role</span>
-                    <span className="cram-sidebar-kv-val">{activeRole ?? user?.role_name}</span>
-                  </div>
-                  <div className="cram-sidebar-kv">
-                    <span className="cram-sidebar-kv-key">Scope</span>
-                    <span className="cram-sidebar-kv-val">{result.access_scope}</span>
-                  </div>
-                  <div className="cram-sidebar-kv">
-                    <span className="cram-sidebar-kv-key">Latency</span>
-                    <span className="cram-sidebar-kv-val">{result.execution_time_ms}ms</span>
-                  </div>
-                </div>
-              </>
-            )}
-          </nav>
-
-          {/* Sidebar user footer */}
-          <div className="cram-sidebar-footer">
-            <div className="cram-sidebar-footer-avatar">{initials(user?.display_name ?? "U")}</div>
-            <div>
-              <div className="cram-sidebar-footer-name">{user?.display_name}</div>
-              <div className="cram-sidebar-footer-role">{user?.role_name}</div>
-            </div>
+        {/* —— Error ——————————————————————————————————————————— */}
+        {error && (
+          <div style={s.errorBox}>
+            <strong>Error:</strong> {error}
           </div>
-        </aside>
+        )}
 
-        {/* ── Center column ──────────────────────────────────────── */}
-        <main className={`cram-main${result ? " has-right" : ""}`}>
-          <div className="cram-center">
-
-            {/* Page header */}
-            {!result && history.length === 0 && (
-              <div className="cram-page-header">
-                <h1 className="cram-page-header-title">Analytics Query</h1>
-                <p className="cram-page-header-sub">Ask natural language questions about your healthcare data.</p>
-              </div>
-            )}
-
-            {/* Chat history bubbles */}
-            {history.length > 0 && (
-              <div className="cram-chat-list">
-                {history.slice(0, -1).map((entry, i) => (
-                  <div key={i}>
-                    <div className="cram-bubble-user">
-                      <div className="cram-bubble-user-inner">{entry.question}</div>
-                    </div>
-                    <div className="cram-bubble-ai" style={{ marginTop: 10 }}>
-                      <div className="cram-bubble-ai-avatar">AI</div>
-                      <div className="cram-bubble-ai-inner">
-                        {entry.result.answer.slice(0, 160)}{entry.result.answer.length > 160 ? "…" : ""}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-                {result && (
-                  <div className="cram-bubble-user">
-                    <div className="cram-bubble-user-inner">{history[history.length - 1]?.question}</div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Current AI answer */}
-            {result && (
-              <div className="cram-bubble-ai" style={{ marginBottom: 20 }}>
-                <div className="cram-bubble-ai-avatar">AI</div>
-                <div className="cram-bubble-ai-inner" style={{ maxWidth: "100%", flex: 1 }}>
-                  {result.answer.split("\n").map((line, i) => (
-                    <p key={i} style={{ margin: "3px 0" }}>{line}</p>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Suggestion chips */}
-            {(result?.suggestions || []).length > 0 && (
-              <div className="cram-chips-wrap">
-                <div className="cram-chips-label">Suggested follow-ups</div>
-                <div className="cram-chips">
-                  {result!.suggestions.map((q, i) => (
-                    <button key={i} onClick={() => { setQuestion(q); handleSubmit(q); }} className="cram-chip">{q}</button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Query input */}
-            <div className="cram-input-card">
-              <div className="cram-input-bar">
-                <textarea
-                  value={question}
-                  onChange={e => setQuestion(e.target.value)}
-                  onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSubmit(); } }}
-                  placeholder="Ask a question about your healthcare data…"
-                  className="cram-textarea"
-                  rows={2}
-                />
-                <button
-                  onClick={() => handleSubmit()}
-                  disabled={loading || !question.trim()}
-                  className="cram-submit-btn"
-                >
-                  {loading ? "Analyzing…" : "Ask"}
-                </button>
-              </div>
-              <div className="cram-input-hint">Press Enter to send · Shift+Enter for new line</div>
-            </div>
-
-            {error && (
-              <div style={{ marginTop: 12, padding: "10px 14px", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, color: "#991b1b", fontSize: 13 }}>
-                <strong>Error:</strong> {error}
-              </div>
-            )}
-
-            <footer style={{ marginTop: 36, paddingTop: 12, borderTop: "1px solid var(--border)", fontSize: 11, color: "var(--text-muted)", textAlign: "center" }}>
-              AI-generated analysis of synthetic data (Synthea). Results should be verified by qualified professionals.
-            </footer>
-          </div>
-        </main>
-
-        {/* ── Right insight panel ─────────────────────────────────── */}
+        {/* —— Results ————————————————————————————————————————— */}
         {result && (
-          <aside className="cram-right">
+          <div style={s.results}>
+            {/* RAI Banner */}
+            <RAIBanner
+              sensitivityLevel={result.sensitivity_level}
+              confidence={result.confidence}
+              roleName={result.role_name}
+              accessScope={result.access_scope}
+              executionTimeMs={result.execution_time_ms}
+              rowCount={result.row_count}
+              wasModified={result.was_modified}
+              impersonating={!!impersonating}
+            />
 
-            {/* Sensitivity */}
-            <div
-              className="cram-sens-badge"
-              style={{ background: sens.bg, borderColor: sens.border, marginBottom: 10 }}
-            >
-              <span className="cram-sens-icon" style={{ background: sens.dot }} />
-              <span className="cram-sens-label" style={{ color: sens.text }}>
-                {result.sensitivity_level} sensitivity
-              </span>
-              <span className="cram-sens-meta">{result.row_count} rows</span>
+            {/* Answer */}
+            <div style={s.answerCard}>
+              <div style={s.answerText}>
+                {result.answer.split("\n").map((line, i) => (
+                  <p key={i} style={{ margin: "3px 0" }}>{line}</p>
+                ))}
+              </div>
             </div>
 
             {/* Bias alert */}
             {result.bias_alert && (
-              <div className="cram-bias-banner" style={{ marginBottom: 10 }}>
-                <span className="cram-bias-icon">⚠</span>
-                <div><strong>Fairness notice:</strong> {result.bias_alert}</div>
+              <div style={s.biasAlert}>
+                <strong>Fairness notice:</strong> {result.bias_alert}
               </div>
             )}
 
             {/* Sensitivity advisory */}
-            {result.sensitivity_advisory && result.sensitivity_level !== "green" && (
-              <div className="cram-right-card" style={{ marginBottom: 10 }}>
-                <div className="cram-right-card-body" style={{ fontSize: 12, color: sens.text, background: sens.bg }}>
-                  {result.sensitivity_advisory}
-                </div>
+            {result.sensitivity_advisory &&
+              result.sensitivity_level !== "green" &&
+              result.confidence !== "denied" && (
+              <div style={{
+                ...s.advisory,
+                background: result.sensitivity_level === "amber" ? "#fffbeb" : "#fef2f2",
+                borderColor: result.sensitivity_level === "amber" ? "#fde68a" : "#fecaca",
+                color: result.sensitivity_level === "amber" ? "#92400e" : "#991b1b",
+              }}>
+                {result.sensitivity_advisory}
               </div>
             )}
 
-            {/* SQL transparency */}
-            <div className="cram-right-card" style={{ marginBottom: 10 }}>
-              <div className="cram-right-card-header">
-                <span className="cram-right-card-title">Generated SQL</span>
-                <button onClick={() => setShowSql(!showSql)} className="cram-toggle-btn">
-                  {showSql ? "Hide" : "Show"}
-                  <span className="cram-transparency-tag">Transparency</span>
-                </button>
-              </div>
+            {/* Visualization */}
+            {result.visualization && result.visualization.chartType !== "table" && (
+              <ChartRenderer spec={result.visualization} />
+            )}
+
+            {/* Results table */}
+            {result.result_columns.length > 0 && result.result_rows.length > 0 && (
+              <ResultsTable
+                columns={result.result_columns}
+                rows={result.result_rows}
+                totalRows={result.row_count}
+              />
+            )}
+
+            {/* SQL transparency (collapsible) */}
+            <div style={s.sqlSection}>
+              <button onClick={() => setShowSql(!showSql)} style={s.sqlToggle}>
+                {showSql ? "Hide" : "Show"} generated SQL
+                <span style={s.transBadge}>Transparency</span>
+              </button>
               {showSql && (
-                <div className="cram-right-card-body" style={{ padding: "10px" }}>
-                  <SqlBlock sql={result.generated_sql} />
+                <div style={s.sqlContent}>
+                  <pre style={s.sqlCode}>{result.generated_sql}</pre>
                   {result.was_modified && (
-                    <div style={{ marginTop: 8, padding: "6px 10px", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 6, fontSize: 11, color: "#92400e" }}>
-                      Modified for access control: {result.modification_explanation}
+                    <div style={s.modNotice}>
+                      <strong>RBAC modification:</strong>{" "}
+                      {result.modification_explanation}
                     </div>
+                  )}
+                  {result.executed_sql && result.executed_sql !== result.generated_sql && (
+                    <>
+                      <div style={s.sqlLabel}>Executed SQL (after RBAC rewriting):</div>
+                      <pre style={s.sqlCode}>{result.executed_sql}</pre>
+                    </>
                   )}
                 </div>
               )}
             </div>
 
-            {/* Data table */}
-            {result.result_columns.length > 0 && result.result_rows.length > 0 && (
-              <div className="cram-right-card" style={{ marginBottom: 10 }}>
-                <div className="cram-right-card-header">
-                  <span className="cram-right-card-title">Data ({result.row_count} rows)</span>
-                  <button onClick={() => setShowTable(!showTable)} className="cram-toggle-btn">
-                    {showTable ? "Hide" : "Show"}
-                  </button>
-                </div>
-                {showTable && (
-                  <div style={{ padding: "10px" }}>
-                    <div className="cram-table-wrap">
-                      <table className="cram-table">
-                        <thead>
-                          <tr>{result.result_columns.map((col, i) => <th key={i}>{col}</th>)}</tr>
-                        </thead>
-                        <tbody>
-                          {result.result_rows.slice(0, 50).map((row, i) => (
-                            <tr key={i}>
-                              {row.map((val, j) => <td key={j}>{val ?? "—"}</td>)}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                    {result.result_rows.length > 50 && (
-                      <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6, textAlign: "center" }}>
-                        Showing 50 of {result.result_rows.length} rows
-                      </p>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-
             {/* Warnings */}
             {result.warnings.length > 0 && !result.bias_alert && (
-              <div className="cram-right-card">
-                <div className="cram-right-card-body">
-                  {result.warnings.map((w, i) => (
-                    <div key={i} style={{ fontSize: 11, padding: "2px 0", color: "#991b1b" }}>{w}</div>
-                  ))}
-                </div>
+              <div style={s.warningsBox}>
+                {result.warnings.map((w, i) => (
+                  <div key={i} style={s.warningItem}>{w}</div>
+                ))}
               </div>
             )}
-          </aside>
+          </div>
         )}
+
+        {/* —— Disclaimer footer ——————————————————————————————— */}
+        <footer style={s.footer}>
+          AI-generated analysis of synthetic data (Synthea). Results should
+          be verified by qualified professionals. Microsoft Innovation Challenge 2026.
+        </footer>
       </div>
     </div>
   );
 }
 
-/* -- Audit Panel --------------------------------------------- */
-function AuditPanel({ data }: { data: any }) {
-  return (
-    <div>
-      <div className="cram-audit-grid">
-        <div className="cram-audit-stat">
-          <div className="cram-audit-stat-value">{data.total_queries}</div>
-          <div className="cram-audit-stat-label">Total</div>
-        </div>
-        <div className="cram-audit-stat">
-          <div className="cram-audit-stat-value" style={{ color: "#ef4444" }}>{data.denied_count}</div>
-          <div className="cram-audit-stat-label">Denied</div>
-        </div>
-        <div className="cram-audit-stat">
-          <div className="cram-audit-stat-value" style={{ color: "#f59e0b" }}>{data.modified_count}</div>
-          <div className="cram-audit-stat-label">Modified</div>
-        </div>
-        <div className="cram-audit-stat">
-          <div className="cram-audit-stat-value">{data.avg_latency_ms}ms</div>
-          <div className="cram-audit-stat-label">Avg latency</div>
-        </div>
-      </div>
-      {data.by_role?.length > 0 && (
-        <div style={{ marginTop: 10 }}>
-          {data.by_role.map((r: any, i: number) => (
-            <div key={i} style={{ fontSize: 10, color: "var(--sidebar-text)", padding: "3px 0", display: "flex", justifyContent: "space-between", borderBottom: "1px solid var(--sidebar-border)" }}>
-              <span style={{ color: "var(--sidebar-text-h)" }}>{r.role}</span>
-              <span>{r.queries}q · {r.denied} denied</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
+/* —— Styles ——————————————————————————————————————————————————— */
+const s: Record<string, React.CSSProperties> = {
+  page: {
+    minHeight: "100vh",
+    background: "#f8fafc",
+  },
+  container: {
+    maxWidth: 920,
+    margin: "0 auto",
+    padding: "20px 24px",
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+    color: "#0f172a",
+  },
+  loadingPage: {
+    display: "flex", alignItems: "center", justifyContent: "center",
+    height: "100vh", color: "#94a3b8", fontSize: 15,
+  },
+
+  /* Header */
+  header: {
+    display: "flex", justifyContent: "space-between",
+    alignItems: "center", marginBottom: 16,
+  },
+  title: { fontSize: 22, fontWeight: 700, margin: 0, color: "#0f172a" },
+  subtitle: { fontSize: 12, color: "#64748b", marginTop: 2 },
+  headerRight: { display: "flex", alignItems: "center", gap: 8 },
+  headerBtn: {
+    padding: "5px 10px", fontSize: 12,
+    background: "#eff6ff", border: "1px solid #bfdbfe",
+    borderRadius: 6, cursor: "pointer", color: "#1e40af",
+  },
+  userPill: { textAlign: "right" as const },
+  userName: { fontSize: 13, fontWeight: 600, color: "#1e293b" },
+  userRole: { fontSize: 11, color: "#64748b" },
+  logoutBtn: {
+    padding: "5px 10px", fontSize: 12,
+    background: "#f1f5f9", border: "1px solid #e2e8f0",
+    borderRadius: 6, cursor: "pointer", color: "#475569",
+  },
+
+  /* Impersonation */
+  impBar: {
+    display: "flex", alignItems: "center", gap: 8,
+    marginBottom: 12, padding: "8px 12px",
+    background: "#fffbeb", borderRadius: 8,
+    border: "1px solid #fde68a",
+  },
+  impLabel: { fontSize: 12, fontWeight: 600, color: "#92400e", whiteSpace: "nowrap" as const },
+  impSelect: {
+    flex: 1, padding: "5px 8px", fontSize: 13,
+    borderRadius: 6, border: "1px solid #fde68a",
+    background: "#fff", cursor: "pointer",
+  },
+
+  /* Role badge (non-admin) */
+  roleBadge: {
+    marginBottom: 12, padding: "8px 14px",
+    background: "#eff6ff", borderRadius: 8,
+    border: "1px solid #bfdbfe", fontSize: 13,
+  },
+
+  /* Suggestions */
+  suggestions: {
+    display: "flex", alignItems: "center", gap: 6,
+    flexWrap: "wrap" as const, marginBottom: 10,
+  },
+  sugLabel: { fontSize: 12, color: "#64748b" },
+  sugChip: {
+    padding: "5px 12px", fontSize: 12,
+    background: "#fff", border: "1px solid #dbeafe",
+    borderRadius: 20, cursor: "pointer", color: "#1e40af",
+    transition: "background 0.1s",
+  },
+
+  /* Query input */
+  inputRow: { marginBottom: 14 },
+  inputWrapper: {
+    display: "flex", gap: 8, alignItems: "flex-end",
+    background: "#fff", borderRadius: 12,
+    border: "1px solid #cbd5e1", padding: 4,
+  },
+  textarea: {
+    flex: 1, padding: "10px 12px", fontSize: 14,
+    border: "none", outline: "none", resize: "none" as const,
+    fontFamily: "inherit", borderRadius: 8, background: "transparent",
+  },
+  submitBtn: {
+    padding: "10px 22px", fontSize: 14, fontWeight: 600,
+    background: "#2563eb", color: "#fff", border: "none",
+    borderRadius: 8, cursor: "pointer",
+    whiteSpace: "nowrap" as const,
+    display: "flex", alignItems: "center", gap: 6,
+  },
+  spinner: {
+    width: 16, height: 16, border: "2px solid #fff",
+    borderTopColor: "transparent", borderRadius: "50%",
+    display: "inline-block",
+    animation: "spin 0.6s linear infinite",
+  },
+
+  /* Error */
+  errorBox: {
+    padding: "10px 14px", background: "#fef2f2",
+    border: "1px solid #fecaca", borderRadius: 8,
+    color: "#991b1b", fontSize: 13, marginBottom: 12,
+  },
+
+  /* Results */
+  results: {
+    display: "flex", flexDirection: "column" as const, gap: 10,
+  },
+  answerCard: {
+    padding: "16px 18px", background: "#fff",
+    border: "1px solid #e2e8f0", borderRadius: 10,
+  },
+  answerText: { fontSize: 14, lineHeight: 1.7, color: "#1e293b" },
+
+  /* Bias */
+  biasAlert: {
+    padding: "10px 14px", background: "#fef3c7",
+    border: "1px solid #fde68a", borderRadius: 8,
+    fontSize: 13, color: "#92400e", lineHeight: 1.5,
+  },
+
+  /* Advisory */
+  advisory: {
+    padding: "8px 14px", borderRadius: 8,
+    border: "1px solid", fontSize: 13, lineHeight: 1.5,
+  },
+
+  /* SQL section */
+  sqlSection: { marginTop: 2 },
+  sqlToggle: {
+    padding: "6px 12px", fontSize: 12,
+    background: "none", border: "1px solid #e2e8f0",
+    borderRadius: 6, cursor: "pointer", color: "#475569",
+    display: "flex", alignItems: "center", gap: 6,
+  },
+  transBadge: {
+    fontSize: 10, padding: "1px 6px",
+    background: "#dbeafe", color: "#1e40af",
+    borderRadius: 20, fontWeight: 500,
+  },
+  sqlContent: {
+    marginTop: 8, padding: 14,
+    background: "#fff", border: "1px solid #e2e8f0",
+    borderRadius: 8,
+  },
+  sqlLabel: {
+    fontSize: 12, fontWeight: 600, color: "#475569",
+    marginTop: 12, marginBottom: 4,
+  },
+  sqlCode: {
+    background: "#1e293b", color: "#e2e8f0",
+    padding: 14, borderRadius: 8, fontSize: 12,
+    overflow: "auto" as const,
+    whiteSpace: "pre-wrap" as const,
+    fontFamily: '"Fira Code", "Cascadia Code", Consolas, monospace',
+    margin: 0,
+  },
+  modNotice: {
+    marginTop: 8, padding: "6px 10px",
+    background: "#fffbeb", border: "1px solid #fde68a",
+    borderRadius: 6, fontSize: 12, color: "#92400e",
+  },
+
+  /* Warnings */
+  warningsBox: {
+    padding: "8px 14px", background: "#fef2f2",
+    border: "1px solid #fecaca", borderRadius: 8,
+  },
+  warningItem: { fontSize: 13, padding: "3px 0", color: "#991b1b" },
+
+  /* Footer */
+  footer: {
+    marginTop: 28, paddingTop: 14,
+    borderTop: "1px solid #e2e8f0",
+    fontSize: 11, color: "#94a3b8",
+    textAlign: "center" as const,
+  },
+};
