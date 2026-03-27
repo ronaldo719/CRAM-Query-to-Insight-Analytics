@@ -429,7 +429,8 @@ containing synthetic patient data (Synthea).
                 temperature=0, max_tokens=1000,
             )
             sql = response.choices[0].message.content.strip()
-if sql.startswith("
+            if sql.startswith("```"):
+                sql = "\n".join(l for l in sql.split("\n") if not l.strip().startswith("```")).strip()
             return sql
         except Exception as e:
             return f"-- LLM Error: {str(e)[:200]}"
