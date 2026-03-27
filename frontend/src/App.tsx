@@ -14,7 +14,11 @@ export default function App() {
 
 function AppContent() {
   const { user, isLoading } = useAuth();
-  if (isLoading) return <div style={{ textAlign: "center", padding: 80, color: "#64748b", fontFamily: "var(--font-ui, system-ui)" }}>Loading...</div>;
+  if (isLoading) return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh", fontFamily: "Inter, system-ui, sans-serif", color: "#6b7280", fontSize: 14 }}>
+      Loading…
+    </div>
+  );
   if (!user) return <LoginPage />;
   return <QueryInterface />;
 }
@@ -42,13 +46,18 @@ interface QueryResult {
   result_rows: (string | null)[][];
 }
 
-/* -- Role badge helper ---------------------------------------- */
+/* -- Role badge ----------------------------------------------- */
 function RoleBadge({ role }: { role: string }) {
   const cls = ["doctor","nurse","billing","researcher","admin"].includes(role) ? role : "default";
   return <span className={`cram-role-badge ${cls}`}>{role}</span>;
 }
 
-/* -- Prism highlight helper ------------------------------------ */
+/* -- Initials from display name ------------------------------ */
+function initials(name: string) {
+  return name.split(" ").map(p => p[0]).join("").slice(0, 2).toUpperCase();
+}
+
+/* -- Prism SQL block ----------------------------------------- */
 function SqlBlock({ sql }: { sql: string }) {
   const ref = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -58,7 +67,7 @@ function SqlBlock({ sql }: { sql: string }) {
   }, [sql]);
   return (
     <div className="cram-sql-block">
-      <pre className="language-sql" style={{ margin: 0, borderRadius: 10, fontSize: 12, fontFamily: "var(--font-mono, monospace)" }}>
+      <pre className="language-sql" style={{ margin: 0 }}>
         <code ref={ref} className="language-sql">{sql}</code>
       </pre>
     </div>
@@ -140,88 +149,149 @@ function QueryInterface() {
 
   return (
     <div className="cram-root">
-      {/* ── Sticky Navbar ──────────────────────────────────────── */}
+
+      {/* ── Navbar ─────────────────────────────────────────────── */}
       <nav className="cram-navbar">
-        <button className="cram-sidebar-toggle" onClick={() => setSidebarOpen(o => !o)}>☰</button>
-        <span className="cram-navbar-brand">
-          Query-to-Insight
-          <span className="cram-navbar-sub">Healthcare Analytics</span>
-        </span>
-        <div className="cram-navbar-spacer" />
-        <div className="cram-navbar-user">
-          <span className="cram-navbar-name">{user?.display_name}</span>
-          <RoleBadge role={activeRole ?? user?.role_name ?? ""} />
-          {isAdmin && (
-            <button
-              onClick={() => { setShowAudit(!showAudit); if (!auditData) loadAudit(); }}
-              style={nb.auditBtn}
-            >
-              {showAudit ? "Hide" : "Show"} audit
-            </button>
-          )}
-          <button onClick={logout} style={nb.logoutBtn}>Sign out</button>
+        {/* Logo zone — lines up with sidebar */}
+        <div className="cram-navbar-logo">
+          <button className="cram-sidebar-toggle" onClick={() => setSidebarOpen(o => !o)}>☰</button>
+          <div className="cram-navbar-mark">Q</div>
+          <span className="cram-navbar-brand">Query-to-Insight</span>
+        </div>
+
+        {/* Content zone */}
+        <div className="cram-navbar-content">
+          <span className="cram-navbar-title">Healthcare Analytics</span>
+          <div className="cram-navbar-spacer" />
+          <div className="cram-navbar-actions">
+            {isAdmin && (
+              <button
+                className="cram-nav-btn"
+                onClick={() => { setShowAudit(!showAudit); if (!auditData) loadAudit(); }}
+              >
+                {showAudit ? "Hide" : "Show"} audit
+              </button>
+            )}
+            <RoleBadge role={activeRole ?? user?.role_name ?? ""} />
+            <span className="cram-navbar-name">{user?.display_name}</span>
+            <div className="cram-navbar-avatar" title={user?.display_name}>
+              {initials(user?.display_name ?? "U")}
+            </div>
+            <button className="cram-nav-btn-ghost" onClick={logout}>Sign out</button>
+          </div>
         </div>
       </nav>
 
       <div className="cram-shell">
-        {/* ── Left Sidebar ─────────────────────────────────────── */}
+
+        {/* ── Dark sidebar ───────────────────────────────────────── */}
         <aside className={`cram-sidebar${sidebarOpen ? " open" : ""}`}>
-          {isAdmin && (
-            <div className="cram-sidebar-section">
-              <span className="cram-sidebar-label">Viewing as</span>
-              {impersonatableUsers.length > 0 && (
-                <select
-                  value={impersonating || ""}
-                  onChange={e => handleRoleSwitch(e.target.value || null)}
-                  className="cram-imp-select"
-                >
-                  <option value="">Myself (Admin)</option>
-                  {impersonatableUsers.filter(u => u.external_id !== user?.external_id).map(u => (
-                    <option key={u.external_id} value={u.external_id}>{u.display_name} — {u.role_name}</option>
-                  ))}
-                </select>
-              )}
-            </div>
-          )}
+          <nav className="cram-sidebar-nav">
 
-          {showAudit && auditData && (
-            <div className="cram-sidebar-section">
-              <span className="cram-sidebar-label">Audit dashboard</span>
-              <AuditPanel data={auditData} />
-            </div>
-          )}
+            {/* Static nav items */}
+            <span className="cram-sidebar-section-label">Workspace</span>
+            <button className="cram-sidebar-item active">
+              <span className="cram-sidebar-icon">💬</span>
+              Analytics Query
+            </button>
 
-          {/* Conversation history in sidebar */}
-          {history.length > 1 && (
-            <div className="cram-sidebar-section">
-              <span className="cram-sidebar-label">History</span>
-              {history.slice(0, -1).reverse().map((entry, i) => (
-                <div key={i} style={sb.histEntry}>
-                  <div style={sb.histQ}>{entry.question}</div>
-                  <div style={sb.histA}>{entry.result.answer.slice(0, 100)}…</div>
+            {isAdmin && (
+              <>
+                <div className="cram-sidebar-divider" />
+                <span className="cram-sidebar-section-label">Admin</span>
+
+                {/* Impersonation */}
+                <div className="cram-sidebar-inner">
+                  <div style={{ fontSize: 11, color: "var(--sidebar-text)", marginBottom: 4, fontWeight: 500 }}>Viewing as</div>
+                  {impersonatableUsers.length > 0 && (
+                    <select
+                      value={impersonating || ""}
+                      onChange={e => handleRoleSwitch(e.target.value || null)}
+                      className="cram-imp-select"
+                    >
+                      <option value="">Myself (Admin)</option>
+                      {impersonatableUsers.filter(u => u.external_id !== user?.external_id).map(u => (
+                        <option key={u.external_id} value={u.external_id}>{u.display_name} — {u.role_name}</option>
+                      ))}
+                    </select>
+                  )}
                 </div>
-              ))}
-            </div>
-          )}
+              </>
+            )}
 
-          <div className="cram-sidebar-section">
-            <span className="cram-sidebar-label">Access</span>
-            <div style={sb.accessRow}>
-              <span style={sb.accessKey}>Scope</span>
-              <span style={sb.accessVal}>{result?.access_scope ?? "—"}</span>
-            </div>
-            <div style={sb.accessRow}>
-              <span style={sb.accessKey}>Role</span>
-              <span style={sb.accessVal}>{activeRole ?? user?.role_name ?? "—"}</span>
+            {/* Audit panel */}
+            {showAudit && auditData && (
+              <>
+                <div className="cram-sidebar-divider" />
+                <span className="cram-sidebar-section-label">Audit</span>
+                <div className="cram-sidebar-inner">
+                  <AuditPanel data={auditData} />
+                </div>
+              </>
+            )}
+
+            {/* History */}
+            {history.length > 1 && (
+              <>
+                <div className="cram-sidebar-divider" />
+                <span className="cram-sidebar-section-label">History</span>
+                <div className="cram-sidebar-inner">
+                  {history.slice(0, -1).reverse().map((entry, i) => (
+                    <div key={i} className="cram-sidebar-hist">
+                      <div className="cram-sidebar-hist-q">{entry.question}</div>
+                      <div className="cram-sidebar-hist-a">{entry.result.answer.slice(0, 80)}…</div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {/* Access info */}
+            {result && (
+              <>
+                <div className="cram-sidebar-divider" />
+                <span className="cram-sidebar-section-label">Access</span>
+                <div className="cram-sidebar-inner">
+                  <div className="cram-sidebar-kv">
+                    <span className="cram-sidebar-kv-key">Role</span>
+                    <span className="cram-sidebar-kv-val">{activeRole ?? user?.role_name}</span>
+                  </div>
+                  <div className="cram-sidebar-kv">
+                    <span className="cram-sidebar-kv-key">Scope</span>
+                    <span className="cram-sidebar-kv-val">{result.access_scope}</span>
+                  </div>
+                  <div className="cram-sidebar-kv">
+                    <span className="cram-sidebar-kv-key">Latency</span>
+                    <span className="cram-sidebar-kv-val">{result.execution_time_ms}ms</span>
+                  </div>
+                </div>
+              </>
+            )}
+          </nav>
+
+          {/* Sidebar user footer */}
+          <div className="cram-sidebar-footer">
+            <div className="cram-sidebar-footer-avatar">{initials(user?.display_name ?? "U")}</div>
+            <div>
+              <div className="cram-sidebar-footer-name">{user?.display_name}</div>
+              <div className="cram-sidebar-footer-role">{user?.role_name}</div>
             </div>
           </div>
         </aside>
 
-        {/* ── Main center column ─────────────────────────────── */}
+        {/* ── Center column ──────────────────────────────────────── */}
         <main className={`cram-main${result ? " has-right" : ""}`}>
           <div className="cram-center">
 
-            {/* ── Chat history (bubble layout) ───────────────── */}
+            {/* Page header */}
+            {!result && history.length === 0 && (
+              <div className="cram-page-header">
+                <h1 className="cram-page-header-title">Analytics Query</h1>
+                <p className="cram-page-header-sub">Ask natural language questions about your healthcare data.</p>
+              </div>
+            )}
+
+            {/* Chat history bubbles */}
             {history.length > 0 && (
               <div className="cram-chat-list">
                 {history.slice(0, -1).map((entry, i) => (
@@ -229,15 +299,14 @@ function QueryInterface() {
                     <div className="cram-bubble-user">
                       <div className="cram-bubble-user-inner">{entry.question}</div>
                     </div>
-                    <div className="cram-bubble-ai" style={{ marginTop: 8 }}>
+                    <div className="cram-bubble-ai" style={{ marginTop: 10 }}>
                       <div className="cram-bubble-ai-avatar">AI</div>
                       <div className="cram-bubble-ai-inner">
-                        {entry.result.answer.slice(0, 150)}{entry.result.answer.length > 150 ? "…" : ""}
+                        {entry.result.answer.slice(0, 160)}{entry.result.answer.length > 160 ? "…" : ""}
                       </div>
                     </div>
                   </div>
                 ))}
-                {/* Current question */}
                 {result && (
                   <div className="cram-bubble-user">
                     <div className="cram-bubble-user-inner">{history[history.length - 1]?.question}</div>
@@ -246,48 +315,9 @@ function QueryInterface() {
               </div>
             )}
 
-            {/* ── Suggestion chips ──────────────────────────── */}
-            {(result?.suggestions || []).length > 0 && (
-              <div style={{ marginBottom: 14 }}>
-                <p style={{ fontSize: 11, color: "#94a3b8", marginBottom: 8, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>
-                  Suggested follow-ups
-                </p>
-                <div className="cram-chips">
-                  {result!.suggestions.map((q, i) => (
-                    <button key={i} onClick={() => { setQuestion(q); handleSubmit(q); }} className="cram-chip">{q}</button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* ── Query input ───────────────────────────────── */}
-            <div className="cram-input-bar">
-              <textarea
-                value={question}
-                onChange={e => setQuestion(e.target.value)}
-                onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSubmit(); } }}
-                placeholder="Ask a question about your healthcare data…"
-                className="cram-textarea"
-                rows={2}
-              />
-              <button
-                onClick={() => handleSubmit()}
-                disabled={loading || !question.trim()}
-                className="cram-submit-btn"
-              >
-                {loading ? "Analyzing…" : "Ask"}
-              </button>
-            </div>
-
-            {error && (
-              <div style={{ padding: "10px 14px", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, color: "#991b1b", fontSize: 13, marginTop: 10 }}>
-                <strong>Error:</strong> {error}
-              </div>
-            )}
-
-            {/* ── Current answer (AI bubble) ────────────────── */}
+            {/* Current AI answer */}
             {result && (
-              <div className="cram-bubble-ai" style={{ marginTop: 16 }}>
+              <div className="cram-bubble-ai" style={{ marginBottom: 20 }}>
                 <div className="cram-bubble-ai-avatar">AI</div>
                 <div className="cram-bubble-ai-inner" style={{ maxWidth: "100%", flex: 1 }}>
                   {result.answer.split("\n").map((line, i) => (
@@ -297,25 +327,66 @@ function QueryInterface() {
               </div>
             )}
 
-            <footer style={{ marginTop: 32, paddingTop: 12, borderTop: "1px solid #e2e8f0", fontSize: 11, color: "#94a3b8", textAlign: "center" }}>
-              <em>AI-generated analysis of synthetic data (Synthea). Results should be verified by qualified professionals.</em>
+            {/* Suggestion chips */}
+            {(result?.suggestions || []).length > 0 && (
+              <div className="cram-chips-wrap">
+                <div className="cram-chips-label">Suggested follow-ups</div>
+                <div className="cram-chips">
+                  {result!.suggestions.map((q, i) => (
+                    <button key={i} onClick={() => { setQuestion(q); handleSubmit(q); }} className="cram-chip">{q}</button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Query input */}
+            <div className="cram-input-card">
+              <div className="cram-input-bar">
+                <textarea
+                  value={question}
+                  onChange={e => setQuestion(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSubmit(); } }}
+                  placeholder="Ask a question about your healthcare data…"
+                  className="cram-textarea"
+                  rows={2}
+                />
+                <button
+                  onClick={() => handleSubmit()}
+                  disabled={loading || !question.trim()}
+                  className="cram-submit-btn"
+                >
+                  {loading ? "Analyzing…" : "Ask"}
+                </button>
+              </div>
+              <div className="cram-input-hint">Press Enter to send · Shift+Enter for new line</div>
+            </div>
+
+            {error && (
+              <div style={{ marginTop: 12, padding: "10px 14px", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, color: "#991b1b", fontSize: 13 }}>
+                <strong>Error:</strong> {error}
+              </div>
+            )}
+
+            <footer style={{ marginTop: 36, paddingTop: 12, borderTop: "1px solid var(--border)", fontSize: 11, color: "var(--text-muted)", textAlign: "center" }}>
+              AI-generated analysis of synthetic data (Synthea). Results should be verified by qualified professionals.
             </footer>
           </div>
         </main>
 
-        {/* ── Right results panel ─────────────────────────────── */}
+        {/* ── Right insight panel ─────────────────────────────────── */}
         {result && (
           <aside className="cram-right">
-            {/* Sensitivity badge */}
+
+            {/* Sensitivity */}
             <div
               className="cram-sens-badge"
-              style={{ background: sens.bg, borderColor: sens.border, marginBottom: 14 }}
+              style={{ background: sens.bg, borderColor: sens.border, marginBottom: 10 }}
             >
               <span className="cram-sens-icon" style={{ background: sens.dot }} />
               <span className="cram-sens-label" style={{ color: sens.text }}>
                 {result.sensitivity_level} sensitivity
               </span>
-              <span className="cram-sens-meta">{result.execution_time_ms}ms · {result.row_count} rows</span>
+              <span className="cram-sens-meta">{result.row_count} rows</span>
             </div>
 
             {/* Bias alert */}
@@ -328,40 +399,45 @@ function QueryInterface() {
 
             {/* Sensitivity advisory */}
             {result.sensitivity_advisory && result.sensitivity_level !== "green" && (
-              <div style={{
-                padding: "9px 12px", borderRadius: 8, fontSize: 12, marginBottom: 10,
-                background: sens.bg, border: `1px solid ${sens.border}`, color: sens.text,
-              }}>
-                {result.sensitivity_advisory}
+              <div className="cram-right-card" style={{ marginBottom: 10 }}>
+                <div className="cram-right-card-body" style={{ fontSize: 12, color: sens.text, background: sens.bg }}>
+                  {result.sensitivity_advisory}
+                </div>
               </div>
             )}
 
-            {/* SQL transparency toggle */}
-            <div style={{ marginBottom: 6 }}>
-              <button onClick={() => setShowSql(!showSql)} className="cram-toggle-btn">
-                {showSql ? "▲" : "▼"} {showSql ? "Hide" : "Show"} SQL
-                <span className="cram-transparency-tag">Transparency</span>
-              </button>
-            </div>
-            {showSql && (
-              <div style={{ marginBottom: 10 }}>
-                <SqlBlock sql={result.generated_sql} />
-                {result.was_modified && (
-                  <div style={{ marginTop: 6, padding: "6px 10px", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 6, fontSize: 11, color: "#92400e" }}>
-                    Modified for access control: {result.modification_explanation}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Data table toggle */}
-            {result.result_columns.length > 0 && result.result_rows.length > 0 && (
-              <div style={{ marginBottom: 6 }}>
-                <button onClick={() => setShowTable(!showTable)} className="cram-toggle-btn">
-                  {showTable ? "▲" : "▼"} {showTable ? "Hide" : "Show"} table ({result.row_count} rows)
+            {/* SQL transparency */}
+            <div className="cram-right-card" style={{ marginBottom: 10 }}>
+              <div className="cram-right-card-header">
+                <span className="cram-right-card-title">Generated SQL</span>
+                <button onClick={() => setShowSql(!showSql)} className="cram-toggle-btn">
+                  {showSql ? "Hide" : "Show"}
+                  <span className="cram-transparency-tag">Transparency</span>
                 </button>
+              </div>
+              {showSql && (
+                <div className="cram-right-card-body" style={{ padding: "10px" }}>
+                  <SqlBlock sql={result.generated_sql} />
+                  {result.was_modified && (
+                    <div style={{ marginTop: 8, padding: "6px 10px", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 6, fontSize: 11, color: "#92400e" }}>
+                      Modified for access control: {result.modification_explanation}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Data table */}
+            {result.result_columns.length > 0 && result.result_rows.length > 0 && (
+              <div className="cram-right-card" style={{ marginBottom: 10 }}>
+                <div className="cram-right-card-header">
+                  <span className="cram-right-card-title">Data ({result.row_count} rows)</span>
+                  <button onClick={() => setShowTable(!showTable)} className="cram-toggle-btn">
+                    {showTable ? "Hide" : "Show"}
+                  </button>
+                </div>
                 {showTable && (
-                  <div style={{ marginTop: 6 }}>
+                  <div style={{ padding: "10px" }}>
                     <div className="cram-table-wrap">
                       <table className="cram-table">
                         <thead>
@@ -377,7 +453,7 @@ function QueryInterface() {
                       </table>
                     </div>
                     {result.result_rows.length > 50 && (
-                      <p style={{ fontSize: 11, color: "#94a3b8", marginTop: 4, textAlign: "center" }}>
+                      <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6, textAlign: "center" }}>
                         Showing 50 of {result.result_rows.length} rows
                       </p>
                     )}
@@ -388,10 +464,12 @@ function QueryInterface() {
 
             {/* Warnings */}
             {result.warnings.length > 0 && !result.bias_alert && (
-              <div style={{ padding: 10, background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8 }}>
-                {result.warnings.map((w, i) => (
-                  <div key={i} style={{ fontSize: 12, padding: "2px 0", color: "#991b1b" }}>{w}</div>
-                ))}
+              <div className="cram-right-card">
+                <div className="cram-right-card-body">
+                  {result.warnings.map((w, i) => (
+                    <div key={i} style={{ fontSize: 11, padding: "2px 0", color: "#991b1b" }}>{w}</div>
+                  ))}
+                </div>
               </div>
             )}
           </aside>
@@ -401,22 +479,22 @@ function QueryInterface() {
   );
 }
 
-/* -- Audit Panel (admin only) --------------------------------- */
+/* -- Audit Panel --------------------------------------------- */
 function AuditPanel({ data }: { data: any }) {
   return (
     <div>
       <div className="cram-audit-grid">
         <div className="cram-audit-stat">
           <div className="cram-audit-stat-value">{data.total_queries}</div>
-          <div className="cram-audit-stat-label">Total queries</div>
+          <div className="cram-audit-stat-label">Total</div>
         </div>
         <div className="cram-audit-stat">
           <div className="cram-audit-stat-value" style={{ color: "#ef4444" }}>{data.denied_count}</div>
-          <div className="cram-audit-stat-label">Denied ({data.denial_rate}%)</div>
+          <div className="cram-audit-stat-label">Denied</div>
         </div>
         <div className="cram-audit-stat">
           <div className="cram-audit-stat-value" style={{ color: "#f59e0b" }}>{data.modified_count}</div>
-          <div className="cram-audit-stat-label">RBAC modified</div>
+          <div className="cram-audit-stat-label">Modified</div>
         </div>
         <div className="cram-audit-stat">
           <div className="cram-audit-stat-value">{data.avg_latency_ms}ms</div>
@@ -426,9 +504,9 @@ function AuditPanel({ data }: { data: any }) {
       {data.by_role?.length > 0 && (
         <div style={{ marginTop: 10 }}>
           {data.by_role.map((r: any, i: number) => (
-            <div key={i} style={{ fontSize: 11, color: "#475569", padding: "2px 0", display: "flex", justifyContent: "space-between" }}>
-              <span>{r.role}</span>
-              <span style={{ color: "#94a3b8" }}>{r.queries}q / {r.denied} denied</span>
+            <div key={i} style={{ fontSize: 10, color: "var(--sidebar-text)", padding: "3px 0", display: "flex", justifyContent: "space-between", borderBottom: "1px solid var(--sidebar-border)" }}>
+              <span style={{ color: "var(--sidebar-text-h)" }}>{r.role}</span>
+              <span>{r.queries}q · {r.denied} denied</span>
             </div>
           ))}
         </div>
@@ -436,19 +514,3 @@ function AuditPanel({ data }: { data: any }) {
     </div>
   );
 }
-
-/* -- Navbar button styles ------------------------------------- */
-const nb: Record<string, React.CSSProperties> = {
-  logoutBtn: { padding: "5px 12px", fontSize: 12, background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 6, cursor: "pointer", color: "#475569", fontFamily: "var(--font-ui, system-ui)" },
-  auditBtn:  { padding: "5px 12px", fontSize: 12, background: "#e0f0fa", border: "1px solid #a8d4f0", borderRadius: 6, cursor: "pointer", color: "#1D6FA8", fontFamily: "var(--font-ui, system-ui)" },
-};
-
-/* -- Sidebar item styles -------------------------------------- */
-const sb: Record<string, React.CSSProperties> = {
-  histEntry: { padding: "8px 0", borderBottom: "1px solid #f1f5f9" },
-  histQ:     { fontSize: 12, fontWeight: 600, color: "#1e293b", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
-  histA:     { fontSize: 11, color: "#94a3b8", marginTop: 2 },
-  accessRow: { display: "flex", justifyContent: "space-between", fontSize: 12, padding: "3px 0" },
-  accessKey: { color: "#94a3b8", fontWeight: 500 },
-  accessVal: { color: "#334155", fontWeight: 600, textAlign: "right" as const, maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const },
-};
