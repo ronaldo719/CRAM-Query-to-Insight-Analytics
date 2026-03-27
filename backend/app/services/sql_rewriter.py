@@ -109,7 +109,6 @@ WHERE EXISTS (
 
     def _inject_provider_filter(self, sql: str, ctx: RoleContext) -> str:
         """Inject provider filter into a GROUP BY query via a JOIN."""
-        import re
         stripped = sql.rstrip().rstrip(';')
 
         # Find the patient table reference (e.g., "patients p" or "patients")
@@ -149,7 +148,6 @@ WHERE EXISTS (
 
     def _inject_org_filter(self, sql: str, ctx: RoleContext) -> str:
         """Inject organization filter into a GROUP BY query."""
-        import re
         stripped = sql.rstrip().rstrip(';')
 
         patient_col = self._find_patient_join_col(sql)

@@ -16,7 +16,6 @@ Content Safety isn't set up yet.
 """
 
 from dataclasses import dataclass
-from typing import Optional
 from app.config import settings
 
 

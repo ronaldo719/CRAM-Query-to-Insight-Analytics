@@ -61,7 +61,7 @@ class RoleContext:
             lines.append(f"This user is a physician (provider_id = '{self.provider_id}').")
             lines.append("Every query touching patient data MUST filter to only this provider's patients.")
             lines.append("Add this to EVERY query that references patients or patient-linked tables:")
-            lines.append(f"  JOIN encounters e_rbac ON e_rbac.PATIENT = <patient_column>")
+            lines.append("  JOIN encounters e_rbac ON e_rbac.PATIENT = <patient_column>")
             lines.append(f"  AND e_rbac.PROVIDER = '{self.provider_id}'")
             lines.append("If the query already joins encounters, just add: AND e.PROVIDER = '{}'".format(self.provider_id))
             lines.append("")
@@ -70,7 +70,7 @@ class RoleContext:
             lines.append("### ROW-LEVEL RESTRICTION: DEPARTMENT PATIENTS ONLY")
             lines.append(f"This user belongs to organization_id = '{self.organization_id}'.")
             lines.append("Every query MUST filter to patients seen at this organization.")
-            lines.append(f"  JOIN encounters e_rbac ON e_rbac.PATIENT = <patient_column>")
+            lines.append("  JOIN encounters e_rbac ON e_rbac.PATIENT = <patient_column>")
             lines.append(f"  AND e_rbac.ORGANIZATION = '{self.organization_id}'")
             lines.append("")
 
