@@ -78,7 +78,7 @@ async def login(request: LoginRequest, response: Response):
         value=token,
         httponly=True,
         secure=True,
-        samesite="lax",
+        samesite="none",
         max_age=auth_service.ACCESS_TOKEN_EXPIRE_HOURS * 3600,
         path="/",
     )
@@ -98,7 +98,7 @@ async def login(request: LoginRequest, response: Response):
 @router.post("/logout")
 async def logout(response: Response):
     """Clear the auth cookie."""
-    response.delete_cookie(key="q2i_token", path="/")
+    response.delete_cookie(key="q2i_token", path="/", samesite="none", secure=True)
     return {"message": "Logged out"}
 
 
