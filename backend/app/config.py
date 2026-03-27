@@ -13,7 +13,7 @@ API is identical for both.
 """
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import lru_cache
 from dotenv import load_dotenv
 

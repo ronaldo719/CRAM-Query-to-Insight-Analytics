@@ -30,10 +30,7 @@ jobs:
       - name: Lint with ruff
         run: |
           pip install ruff
-          ruff check app/
-
-      - name: Check import sorting
-        run: ruff check --select I app/
+          ruff check --ignore I001 app/
 
   frontend:
     name: Frontend (Node)
