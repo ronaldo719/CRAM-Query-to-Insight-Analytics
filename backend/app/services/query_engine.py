@@ -429,13 +429,7 @@ containing synthetic patient data (Synthea).
                 temperature=0, max_tokens=1000,
             )
             sql = response.choices[0].message.content.strip()
-            if sql.startswith("```"):
-                sql = "\n".join(l for l in sql.split("\n") if not l.strip().startswith("```")).strip()
-            # Strip ANSI escape codes that some models emit
-            # Real ESC sequences (\x1b[...m)
-            sql = re.sub(r"\x1b\[[0-9;]*m", "", sql)
-            # Literal bracket codes ([0m, [4m, [1m etc.) — short codes only to avoid breaking T-SQL [identifiers]
-            sql = re.sub(r"\[(\d{1,2};)*\d{1,2}m", "", sql)
+if sql.startswith("
             return sql
         except Exception as e:
             return f"-- LLM Error: {str(e)[:200]}"

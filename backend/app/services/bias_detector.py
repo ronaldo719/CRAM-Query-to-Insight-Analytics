@@ -14,6 +14,7 @@ to prompt human investigation. The warning says "consider consulting
 domain experts" rather than making causal claims.
 """
 
+import re
 from typing import Optional
 from dataclasses import dataclass
 
@@ -42,6 +43,15 @@ class BiasAlert:
     max_group: str = ""
     min_group: str = ""
     disparity_ratio: float = 0.0
+
+
+def _matches_outcome(col_name: str) -> bool:
+    """Check if column name matches outcome patterns with word boundaries."""
+    col_lower = col_name.lower()
+    for kw in OUTCOME_COLUMNS:
+        if col_lower == kw or re.search(rf'\b{re.escape(kw)}\b', col_lower):
+            return True
+    return False
 
 
 class BiasDetector:
@@ -80,7 +90,7 @@ class BiasDetector:
         for i, c in enumerate(col_lower):
             if i == demo_idx:
                 continue
-            if c in OUTCOME_COLUMNS or any(kw in c for kw in OUTCOME_COLUMNS):
+            if c in OUTCOME_COLUMNS or _matches_outcome(c):
                 outcome_idx = i
                 outcome_col = columns[i]
                 break
@@ -106,7 +116,11 @@ class BiasDetector:
                 group_name = str(row[demo_idx]) if row[demo_idx] else "Unknown"
                 value = float(row[outcome_idx]) if row[outcome_idx] else None
                 if value is not None and value > 0:
-                    groups[group_name] = value
+                    if group_name in groups:
+                        # Aggregate duplicate groups by summing
+                        groups[group_name] += value
+                    else:
+                        groups[group_name] = value
             except (ValueError, TypeError, IndexError):
                 continue
 

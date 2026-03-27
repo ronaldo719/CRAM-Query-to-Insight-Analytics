@@ -43,10 +43,6 @@ class Settings:
     azure_openai_deployment: str = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini")
     azure_openai_api_version: str = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
 
-    # ── Direct OpenAI Fallback (Path B) ───────────────────────
-    # openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
-    # openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-
     # ── Azure Content Safety ──────────────────────────────────
     content_safety_endpoint: str = os.getenv("CONTENT_SAFETY_ENDPOINT", "")
     content_safety_key: str = os.getenv("CONTENT_SAFETY_KEY", "")

@@ -67,6 +67,9 @@ async def login(request: LoginRequest, response: Response):
             "user_id": user["user_id"],
             "display_name": user["display_name"],
             "role": user["role_name"],
+            "row_scope": user["row_scope"],
+            "organization_id": user.get("organization_id"),
+            "provider_id": user.get("provider_id"),
         }
     )
 

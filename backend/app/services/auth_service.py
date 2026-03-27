@@ -27,7 +27,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import pyodbc
-from jose import JWTError, jwt
+import jwt
+from jwt.exceptions import PyJWTError as JWTError
 from passlib.context import CryptContext
 
 from app.config import settings

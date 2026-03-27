@@ -78,6 +78,9 @@ async def get_current_user(
         "external_id": payload.get("sub"),
         "display_name": payload.get("display_name"),
         "role_name": payload.get("role"),
+        "row_scope": payload.get("row_scope"),
+        "organization_id": payload.get("organization_id"),
+        "provider_id": payload.get("provider_id"),
     }
 
 
@@ -98,6 +101,9 @@ async def get_current_user_or_none(
         "external_id": payload.get("sub"),
         "display_name": payload.get("display_name"),
         "role_name": payload.get("role"),
+        "row_scope": payload.get("row_scope"),
+        "organization_id": payload.get("organization_id"),
+        "provider_id": payload.get("provider_id"),
     }
 
 

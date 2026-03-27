@@ -35,6 +35,7 @@ export default function AuditDashboard() {
   }, []);
 
   const loadStats = async () => {
+    setLoading(true);
     try {
       const res = await authFetch(`${API_URL}/api/audit/stats`);
       if (res.ok) setStats(await res.json());
