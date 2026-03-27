@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: CRAM-Query-to-Insight-Analytics/backend
+        working-directory: backend
 
     steps:
       - uses: actions/checkout@v4
@@ -22,7 +22,7 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-          cache-dependency-path: CRAM-Query-to-Insight-Analytics/backend/requirements.txt
+          cache-dependency-path: backend/requirements.txt
 
       - name: Install dependencies
         run: pip install -r requirements.txt
@@ -40,7 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: CRAM-Query-to-Insight-Analytics/frontend
+        working-directory: frontend
 
     steps:
       - uses: actions/checkout@v4
@@ -50,7 +50,7 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: CRAM-Query-to-Insight-Analytics/frontend/package-lock.json
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
         run: npm ci
@@ -80,10 +80,10 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-          cache-dependency-path: CRAM-Query-to-Insight-Analytics/backend/requirements.txt
+          cache-dependency-path: backend/requirements.txt
 
       - name: Install dependencies
-        working-directory: CRAM-Query-to-Insight-Analytics/backend
+        working-directory: backend
         run: pip install -r requirements.txt --target=".python_packages/lib/site-packages"
 
       - name: Deploy to Azure App Service
@@ -91,4 +91,4 @@ jobs:
         with:
           app-name: api-q2i-f38387c8
           publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-          package: CRAM-Query-to-Insight-Analytics/backend
+          package: backend
