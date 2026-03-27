@@ -16,7 +16,7 @@ History is stored in-memory (dict) since it only needs to survive within a
 single server process for the hackathon. In production, you'd use Redis.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 from collections import defaultdict
 

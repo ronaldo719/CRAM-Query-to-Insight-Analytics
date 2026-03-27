@@ -430,7 +430,7 @@ containing synthetic patient data (Synthea).
             )
             sql = response.choices[0].message.content.strip()
             if sql.startswith("```"):
-                sql = "\n".join(l for l in sql.split("\n") if not l.strip().startswith("```")).strip()
+                sql = "\n".join(line for line in sql.split("\n") if not line.strip().startswith("```")).strip()
             return sql
         except Exception as e:
             return f"-- LLM Error: {str(e)[:200]}"
@@ -507,7 +507,7 @@ containing synthetic patient data (Synthea).
             )
             text = response.choices[0].message.content.strip()
             if text.startswith("```"):
-                text = "\n".join(l for l in text.split("\n") if not l.strip().startswith("```")).strip()
+                text = "\n".join(line for line in text.split("\n") if not line.strip().startswith("```")).strip()
             return json.loads(text)
         except Exception:
             return None
