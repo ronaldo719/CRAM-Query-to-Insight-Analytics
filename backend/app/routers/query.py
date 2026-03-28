@@ -1,5 +1,5 @@
 """
-Query Router -- Day 3: Full pipeline with conversation + suggestions.
+Query Router -- Day 3: Full pipeline with conversation + suggestions.Day 5: Added cache stats endpoint and from_cache field.
 
 New response fields:
   + sensitivity_level / sensitivity_advisory -- green/amber/red badge
@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from typing import Optional
 
-from app.dependencies.auth import get_current_user
+from app.dependencies.auth import get_current_user, require_admin
 from app.services.query_engine import QueryEngine
 
 router = APIRouter()
@@ -55,6 +55,7 @@ class QueryResponse(BaseModel):
     # Data for frontend table rendering
     result_columns: list[str] = []
     result_rows: list[list] = []
+    from_cache: bool = False
 
 
 @router.post("/ask", response_model=QueryResponse)
@@ -95,6 +96,7 @@ async def ask_question(
         suggestions=result.suggestions,
         result_columns=result.result_columns,
         result_rows=result.raw_results[:100],
+        from_cache=result.from_cache,
     )
 
 
@@ -110,6 +112,12 @@ async def clear_conversation_history(
     effective_user_id = user.get("external_id")
     engine.clear_conversation(effective_user_id)
     return {"message": "Conversation history cleared"}
+
+
+@router.get("/cache-stats")
+async def get_cache_stats(admin: dict = Depends(require_admin)):
+    """Cache performance statistics. Admin-only."""
+    return engine.get_cache_stats()
 
 
 @router.get("/roles")

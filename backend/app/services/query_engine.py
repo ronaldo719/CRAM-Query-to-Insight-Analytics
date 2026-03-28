@@ -23,6 +23,16 @@ Pipeline order:
   12. Generate follow-up suggestions
   13. Store in conversation memory
   14. Audit log
+
+  Query Engine -- Day 5: Added caching layer.
+
+Only change from Day 3: cache check at the start of execute_query()
+and cache store at the end. Cache is keyed by (question, role, scope)
+so different roles get different cached results.
+
+Cache is skipped for:
+  - Denied queries (don't cache errors)
+  - Queries with conversation history (follow-ups need fresh context)
 """
 
 import re
@@ -40,42 +50,36 @@ from app.services.content_safety_service import ContentSafetyService
 from app.services.sensitivity_classifier import SensitivityClassifier
 from app.services.conversation_manager import ConversationManager
 from app.services.bias_detector import BiasDetector
+from app.services.cache_service import CacheService
 
 
 @dataclass
 class QueryResult:
-    """Complete result of a query pipeline execution."""
     answer: str = ""
     visualization: Optional[dict] = None
-
     generated_sql: str = ""
     executed_sql: str = ""
     was_modified: bool = False
     modification_explanation: str = ""
     tables_accessed: list[str] = field(default_factory=list)
-
     role_name: str = ""
     access_scope: str = ""
     warnings: list[str] = field(default_factory=list)
-
     row_count: int = 0
     execution_time_ms: int = 0
     confidence: str = "high"
-
-    # Day 3 additions
     sensitivity_level: str = "green"
     sensitivity_reason: str = ""
     sensitivity_advisory: str = ""
     bias_alert: Optional[str] = None
     suggestions: list[str] = field(default_factory=list)
-
-    # Internal
     was_denied: bool = False
     denial_reason: str = ""
     content_safety_scores: dict = field(default_factory=dict)
     retry_count: int = 0
     raw_results: list = field(default_factory=list)
     result_columns: list[str] = field(default_factory=list)
+    from_cache: bool = False
 
 
 # -- Schema and few-shot examples (unchanged from Day 2) ------
@@ -149,7 +153,6 @@ SQL: SELECT CASE WHEN DATEDIFF(year, p.BIRTHDATE, GETDATE()) < 18 THEN 'Under 18
 
 
 class QueryEngine:
-    """Orchestrates the complete NL-to-SQL pipeline with all Day 3 features."""
 
     MAX_RETRIES = 3
 
@@ -161,6 +164,7 @@ class QueryEngine:
         self.sensitivity_classifier = SensitivityClassifier()
         self.conversation_manager = ConversationManager()
         self.bias_detector = BiasDetector()
+        self.cache = CacheService()
         self.client = get_openai_client()
         self.model = settings.model_name
 
@@ -188,6 +192,35 @@ class QueryEngine:
 
         result.role_name = role_ctx.role_name
         result.access_scope = role_ctx.row_scope
+
+        # -- 1.5 CACHE CHECK ----------------------------------
+        # Only check cache for standalone queries (not follow-ups)
+        has_history = bool(self.conversation_manager.get_history(user_external_id))
+        if not has_history:
+            cached = self.cache.get(question, role_ctx.role_name, role_ctx.row_scope)
+            if cached:
+                result.answer = cached.get("answer", "")
+                result.visualization = cached.get("visualization")
+                result.generated_sql = cached.get("generated_sql", "")
+                result.executed_sql = cached.get("executed_sql", "")
+                result.was_modified = cached.get("was_modified", False)
+                result.modification_explanation = cached.get("modification_explanation", "")
+                result.tables_accessed = cached.get("tables_accessed", [])
+                result.row_count = cached.get("row_count", 0)
+                result.sensitivity_level = cached.get("sensitivity_level", "green")
+                result.sensitivity_advisory = cached.get("sensitivity_advisory", "")
+                result.bias_alert = cached.get("bias_alert")
+                result.result_columns = cached.get("result_columns", [])
+                result.raw_results = cached.get("result_rows", [])
+                result.confidence = cached.get("confidence", "high")
+                result.from_cache = True
+                result.execution_time_ms = int((time.time() - start_time) * 1000)
+                result.warnings = ["Served from cache"]
+                # Still generate fresh suggestions
+                result.suggestions = self.conversation_manager.generate_suggestions(
+                    user_external_id, role_ctx
+                )
+                return result
 
         # -- 1b. Billing clinical query guard -----------------
         if role_ctx.role_name == "billing" and self._is_clinical_query(question):
@@ -353,6 +386,28 @@ class QueryEngine:
         result.confidence = "high" if result.row_count > 0 else "medium"
         result.execution_time_ms = int((time.time() - start_time) * 1000)
 
+        # -- 12b. Cache store ---------------------------------
+        if not result.was_denied and result.row_count > 0:
+            self.cache.put(
+                question, role_ctx.role_name, role_ctx.row_scope,
+                {
+                    "answer": result.answer,
+                    "visualization": result.visualization,
+                    "generated_sql": result.generated_sql,
+                    "executed_sql": result.executed_sql,
+                    "was_modified": result.was_modified,
+                    "modification_explanation": result.modification_explanation,
+                    "tables_accessed": result.tables_accessed,
+                    "row_count": result.row_count,
+                    "sensitivity_level": result.sensitivity_level,
+                    "sensitivity_advisory": result.sensitivity_advisory,
+                    "bias_alert": result.bias_alert,
+                    "result_columns": result.result_columns,
+                    "result_rows": result.raw_results[:100],
+                    "confidence": result.confidence,
+                },
+            )
+
         # -- 13. Audit log ------------------------------------
         await self._log_audit(result, role_ctx, question)
         return result
@@ -360,6 +415,9 @@ class QueryEngine:
     def clear_conversation(self, user_external_id: str):
         """Clear conversation history for a user (called on role switch)."""
         self.conversation_manager.clear(user_external_id)
+
+    def get_cache_stats(self) -> dict:
+        return self.cache.stats()
 
     # Clinical terms that indicate non-financial intent
     _CLINICAL_KEYWORDS = re.compile(
