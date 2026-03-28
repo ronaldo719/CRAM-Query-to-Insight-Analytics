@@ -45,6 +45,7 @@ Follow-up suggestions → Conversation storage → Audit log
 | **Audit dashboard** | Admin panel with total queries, denial rate, RBAC modifications, latency stats |
 | **Auto-visualization** | LLM-generated chart specs rendered as bar, line, pie, or scatter charts via Recharts |
 | **Billing clinical guard** | Regex keyword + LLM prompt deny clinical queries for billing role pre-SQL-generation |
+| **Two-tier query cache** | L1 in-memory (200 entries) + L2 Azure Cache for Redis; 1hr TTL; cache key is role+scope-aware; served hits skip all 14 pipeline steps; graceful L1-only fallback |
 
 ---
 
@@ -74,7 +75,8 @@ CRAM-Query-to-Insight-Analytics/
 │   │       ├── query_engine.py              # 14-step pipeline orchestrator
 │   │       ├── sensitivity_classifier.py    # Green/amber/red classification
 │   │       ├── conversation_manager.py      # Session memory + suggestions
-│   │       └── bias_detector.py             # Demographic disparity alerts
+│   │       ├── bias_detector.py             # Demographic disparity alerts
+│   │       └── cache_service.py             # Two-tier L1/L2 Redis cache
 │   ├── scripts/
 │   │   ├── setup_database.py               # Schema + Synthea data loading
 │   │   └── migrate_auth.py                 # Password seeding
@@ -276,6 +278,46 @@ WHERE EXISTS (
 
 ---
 
+## Two-Tier Query Cache
+
+The `CacheService` short-circuits the full 14-step pipeline for repeated questions, dramatically reducing latency and LLM API cost.
+
+### Architecture
+
+| Tier | Backend | Capacity | Scope |
+|------|---------|----------|-------|
+| **L1** | Python `dict` (in-process) | 200 entries (LRU eviction) | Per server process |
+| **L2** | Azure Cache for Redis (TLS) | Unlimited | Shared across all processes |
+
+### Cache Key
+
+```
+q2i:<SHA256(question.lower() + role + row_scope)[:16]>
+```
+
+Role and row scope are included so that a Physician and a Researcher asking identical questions receive their respective RBAC-filtered results independently.
+
+### Behavior
+
+**Cache hit** — Returns instantly; skips all 14 pipeline steps. Fresh follow-up suggestions are still generated. Response includes `from_cache: true`.
+
+**Cache miss** — Full pipeline runs; result stored in both L1 and L2 at completion (only for non-denied, non-empty results).
+
+**Eligibility** — Only standalone queries are cached; follow-ups that carry conversation history are always executed fresh.
+
+**TTL** — 3600 seconds (1 hour) for both tiers. Redis handles L2 expiration natively via `SETEX`.
+
+**Graceful degradation** — If Redis is unavailable, the service logs a warning and continues with L1 only. The query pipeline is never blocked.
+
+### Cache Statistics
+
+`GET /api/query/cache-stats` (Admin only) returns:
+```json
+{ "l1_entries": 42, "l2_available": true }
+```
+
+---
+
 ## Content Safety Integration
 
 Azure AI Content Safety screens text at **two points**:
@@ -315,6 +357,7 @@ Azure AI Content Safety screens text at **two points**:
 | `GET` | `/api/auth/users` | Admin | List users for impersonation dropdown |
 | `POST` | `/api/query/ask` | Cookie | **Full 14-step NL-to-SQL pipeline** |
 | `POST` | `/api/query/clear-history` | Cookie | Reset conversation memory (on role switch) |
+| `GET` | `/api/query/cache-stats` | Admin | L1/L2 cache statistics |
 | `GET` | `/api/query/roles` | No | Demo roles for role switcher |
 | `GET` | `/api/audit/stats` | Admin | Aggregate audit statistics |
 | `GET` | `/api/audit/log` | Admin | Detailed audit entries (filterable) |
@@ -378,11 +421,12 @@ The `RoleContext` flows through every pipeline step:
 
 ---
 
-## Azure Services (6)
+## Azure Services (7)
 
 - Azure SQL Database — Synthea data + RBAC tables + audit log
 - Azure OpenAI (gpt-4o-mini) — SQL generation, explanation, visualization, suggestions, sensitivity classification
 - Azure AI Content Safety — Input/output screening
+- Azure Cache for Redis — L2 distributed query result cache (TLS, 1hr TTL, role+scope-aware keys)
 - Key Vault — Secret storage
 - Application Insights — Monitoring
 - Log Analytics Workspace — Centralized logging
@@ -424,6 +468,7 @@ AZURE_OPENAI_DEPLOYMENT=gpt-4o-mini
 AZURE_OPENAI_API_VERSION=2024-12-01-preview
 CONTENT_SAFETY_ENDPOINT=...          # optional — degrades gracefully
 CONTENT_SAFETY_KEY=...               # optional — degrades gracefully
+REDIS_URL=rediss://...               # optional — Azure Cache for Redis TLS URL; L1-only fallback if absent
 FRONTEND_URL=http://localhost:5173
 JWT_SECRET_KEY=...   # generate: python3 -c "import secrets; print(secrets.token_hex(32))"
 ```
@@ -466,7 +511,7 @@ JWT_SECRET_KEY=...   # generate: python3 -c "import secrets; print(secrets.token
 |---------------------|----------|
 | **Responsible AI** | Sensitivity classifier (Privacy & Security), bias detector (Fairness), audit log (Accountability), content safety (Reliability & Safety), SQL transparency (Transparency), RBAC (Inclusiveness) |
 | **Innovation** | Conversational memory with follow-ups, proactive suggestion chips, bias detection, two-tier sensitivity classification, auto-visualization engine, billing clinical guard |
-| **Azure Services** | SQL Database, OpenAI, Content Safety, Key Vault, App Insights, Log Analytics |
+| **Azure Services** | SQL Database, OpenAI, Content Safety, Cache for Redis, Key Vault, App Insights, Log Analytics |
 | **Functionality** | 14-step pipeline, 5 distinct roles, 8-layer SQL validation, 9-layer defense-in-depth security, auto-visualization, sortable tables, RAI status bar |
 
 ---

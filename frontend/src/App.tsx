@@ -54,7 +54,10 @@ function QueryInterface() {
   } = useAuth();
 
   const [question, setQuestion] = useState("");
+  const [lastQuestion, setLastQuestion] = useState<string | null>(null);
   const [result, setResult] = useState<QueryResult | null>(null);
+  const [history, setHistory] = useState<{ question: string; answer: string }[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showSql, setShowSql] = useState(false);
@@ -80,6 +83,7 @@ function QueryInterface() {
   const handleSubmit = async (q?: string) => {
     const text = q || question;
     if (!text.trim()) return;
+    setLastQuestion(text);
     setLoading(true);
     setError(null);
 
@@ -93,7 +97,9 @@ function QueryInterface() {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || `HTTP ${res.status}`);
       }
-      setResult(await res.json());
+      const data = await res.json();
+      setResult(data);
+      setHistory(prev => [...prev, { question: text, answer: data.answer }]);
       setQuestion("");
     } catch (err: any) {
       setError(err.message);
@@ -102,64 +108,95 @@ function QueryInterface() {
     }
   };
 
+  const initials = (user?.display_name || "?")
+    .split(" ").map((n: string) => n[0]).join("").slice(0, 2).toUpperCase();
+
   return (
     <div style={s.page}>
-      <div style={s.container}>
-        {/* —— Header ——————————————————————————————————————————— */}
-        <header style={s.header}>
-          <div>
-            <h1 style={s.title}>Query-to-Insight</h1>
-            <p style={s.subtitle}>Healthcare Analytics Engine</p>
-          </div>
-          <div style={s.headerRight}>
-            {isAdmin && (
-              <button
-                onClick={() => setShowAudit(!showAudit)}
-                style={s.headerBtn}
-              >
-                {showAudit ? "Hide" : ""} Audit
-              </button>
-            )}
-            <div style={s.userPill}>
-              <div style={s.userName}>{user?.display_name}</div>
-              <div style={s.userRole}>{user?.role_name}</div>
-            </div>
-            <button onClick={logout} style={s.logoutBtn}>Sign out</button>
-          </div>
-        </header>
+      {/* —— Sidebar ——————————————————————————————————————————— */}
+      <aside style={s.sidebar}>
+        {/* Logo */}
+        <div style={s.sidebarLogo}>
+          <div style={s.sidebarTitle}>Query-to-Insight</div>
+          <div style={s.sidebarSubtitle}>Healthcare Analytics</div>
+        </div>
 
-        {/* —— Admin impersonation ————————————————————————————— */}
+        <div style={s.sidebarDivider} />
+
+        {/* User card */}
+        <div style={s.sidebarUserCard}>
+          <div style={s.sidebarAvatar}>{initials}</div>
+          <div style={s.sidebarUserInfo}>
+            <div style={s.sidebarUserName}>{user?.display_name}</div>
+            <div style={s.sidebarUserRole}>{user?.role_name}</div>
+          </div>
+        </div>
+
+        {/* Access scope */}
+        <div style={s.sidebarMeta}>
+          <span style={s.sidebarMetaLabel}>Access scope</span>
+          <span style={s.sidebarMetaValue}>{(user as any)?.row_scope || "standard"}</span>
+        </div>
+
+        <div style={s.sidebarDivider} />
+
+        {/* Admin: impersonation */}
         {isAdmin && impersonatableUsers.length > 0 && (
-          <div style={s.impBar}>
-            <span style={s.impLabel}>Viewing as:</span>
+          <div style={s.sidebarSection}>
+            <div style={s.sidebarSectionLabel}>Viewing as</div>
             <select
               value={impersonating || ""}
               onChange={e => handleRoleSwitch(e.target.value || null)}
-              style={s.impSelect}
+              style={s.sidebarSelect}
             >
-              <option value="">Myself — Admin (full access)</option>
+              <option value="">Myself (Admin)</option>
               {impersonatableUsers
                 .filter(u => u.external_id !== user?.external_id)
                 .map(u => (
                   <option key={u.external_id} value={u.external_id}>
-                    {u.display_name} — {u.role_name} ({u.row_scope})
+                    {u.display_name} — {u.role_name}
                   </option>
                 ))}
             </select>
           </div>
         )}
 
-        {/* —— Non-admin role badge ———————————————————————————— */}
-        {!isAdmin && (
-          <div style={s.roleBadge}>
-            <strong>{user?.display_name}</strong>
-            <span style={{ color: "#64748b", marginLeft: 8 }}>
-              {user?.role_name} — {(user as any)?.row_scope || "standard"}
-            </span>
+        {/* Admin: audit */}
+        {isAdmin && (
+          <button onClick={() => setShowAudit(!showAudit)} style={s.sidebarBtn}>
+            {showAudit ? "Hide" : "View"} Audit Dashboard
+          </button>
+        )}
+
+        {/* Chat history */}
+        {history.length > 0 && (
+          <div style={s.sidebarSection}>
+            <button onClick={() => setShowHistory(!showHistory)} style={s.historyToggle}>
+              <span>{showHistory ? "▾" : "▸"} Chat history</span>
+              <span style={s.historyCount}>{history.length}</span>
+            </button>
+            {showHistory && (
+              <div style={s.historyList}>
+                {history.map((item, i) => (
+                  <div key={i} style={s.historyItem}>
+                    <div style={s.historyQ}>{item.question}</div>
+                    <div style={s.historyA}>{item.answer}</div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
-        {/* —— Audit dashboard ————————————————————————————————— */}
+        {/* Sign out */}
+        <div style={s.sidebarBottom}>
+          <button onClick={logout} style={s.logoutBtn}>Sign out</button>
+        </div>
+      </aside>
+
+      {/* —— Main content —————————————————————————————————————— */}
+      <div style={s.main}>
+        {/* Audit dashboard */}
         {showAudit && <AuditDashboard />}
 
         {/* —— Suggestion chips ———————————————————————————————— */}
@@ -202,14 +239,18 @@ function QueryInterface() {
                 opacity: loading || !question.trim() ? 0.5 : 1,
               }}
             >
-              {loading ? (
-                <span style={s.spinner} />
-              ) : (
-                "Ask"
-              )}
+              {loading ? <span style={s.spinner} /> : "Ask"}
             </button>
           </div>
         </div>
+
+        {/* —— Current question display ————————————————————————— */}
+        {lastQuestion && (
+          <div style={s.currentQueryBox}>
+            <span style={s.currentQueryLabel}>Current question:</span>
+            <p style={s.currentQueryCode}>{lastQuestion}</p>
+          </div>
+        )}
 
         {/* —— Error ——————————————————————————————————————————— */}
         {error && (
@@ -221,7 +262,6 @@ function QueryInterface() {
         {/* —— Results ————————————————————————————————————————— */}
         {result && (
           <div style={s.results}>
-            {/* RAI Banner */}
             <RAIBanner
               sensitivityLevel={result.sensitivity_level}
               confidence={result.confidence}
@@ -233,7 +273,6 @@ function QueryInterface() {
               impersonating={!!impersonating}
             />
 
-            {/* Answer */}
             <div style={s.answerCard}>
               <div style={s.answerText}>
                 {result.answer.split("\n").map((line, i) => (
@@ -242,14 +281,12 @@ function QueryInterface() {
               </div>
             </div>
 
-            {/* Bias alert */}
             {result.bias_alert && (
               <div style={s.biasAlert}>
                 <strong>Fairness notice:</strong> {result.bias_alert}
               </div>
             )}
 
-            {/* Sensitivity advisory */}
             {result.sensitivity_advisory &&
               result.sensitivity_level !== "green" &&
               result.confidence !== "denied" && (
@@ -263,12 +300,6 @@ function QueryInterface() {
               </div>
             )}
 
-            {/* Visualization */}
-            {result.visualization && result.visualization.chartType !== "table" && (
-              <ChartRenderer spec={result.visualization} />
-            )}
-
-            {/* Results table */}
             {result.result_columns.length > 0 && result.result_rows.length > 0 && (
               <ResultsTable
                 columns={result.result_columns}
@@ -277,7 +308,10 @@ function QueryInterface() {
               />
             )}
 
-            {/* SQL transparency (collapsible) */}
+            {result.visualization && result.visualization.chartType !== "table" && (
+              <ChartRenderer spec={result.visualization} />
+            )}
+
             <div style={s.sqlSection}>
               <button onClick={() => setShowSql(!showSql)} style={s.sqlToggle}>
                 {showSql ? "Hide" : "Show"} generated SQL
@@ -302,7 +336,6 @@ function QueryInterface() {
               )}
             </div>
 
-            {/* Warnings */}
             {result.warnings.length > 0 && !result.bias_alert && (
               <div style={s.warningsBox}>
                 {result.warnings.map((w, i) => (
@@ -313,7 +346,6 @@ function QueryInterface() {
           </div>
         )}
 
-        {/* —— Disclaimer footer ——————————————————————————————— */}
         <footer style={s.footer}>
           AI-generated analysis of synthetic data (Synthea). Results should
           be verified by qualified professionals. Microsoft Innovation Challenge 2026.
@@ -326,13 +358,8 @@ function QueryInterface() {
 /* —— Styles ——————————————————————————————————————————————————— */
 const s: Record<string, React.CSSProperties> = {
   page: {
-    minHeight: "100vh",
+    display: "flex", minHeight: "100vh",
     background: "#f8fafc",
-  },
-  container: {
-    maxWidth: 920,
-    margin: "0 auto",
-    padding: "20px 24px",
     fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
     color: "#0f172a",
   },
@@ -341,60 +368,126 @@ const s: Record<string, React.CSSProperties> = {
     height: "100vh", color: "#94a3b8", fontSize: 15,
   },
 
-  /* Header */
-  header: {
-    display: "flex", justifyContent: "space-between",
-    alignItems: "center", marginBottom: 16,
+  /* —— Sidebar —— */
+  sidebar: {
+    width: 240, flexShrink: 0,
+    background: "#1e1b4b",
+    display: "flex", flexDirection: "column" as const,
+    padding: "24px 16px",
+    minHeight: "100vh",
+    position: "sticky" as const, top: 0, alignSelf: "flex-start" as const,
+    height: "100vh", overflowY: "auto" as const,
   },
-  title: { fontSize: 22, fontWeight: 700, margin: 0, color: "#0f172a" },
-  subtitle: { fontSize: 12, color: "#64748b", marginTop: 2 },
-  headerRight: { display: "flex", alignItems: "center", gap: 8 },
-  headerBtn: {
-    padding: "5px 10px", fontSize: 12,
-    background: "#eff6ff", border: "1px solid #bfdbfe",
-    borderRadius: 6, cursor: "pointer", color: "#1e40af",
+  sidebarLogo: { marginBottom: 4 },
+  sidebarTitle: {
+    fontSize: 16, fontWeight: 700, color: "#fff", letterSpacing: "-0.01em",
   },
-  userPill: { textAlign: "right" as const },
-  userName: { fontSize: 13, fontWeight: 600, color: "#1e293b" },
-  userRole: { fontSize: 11, color: "#64748b" },
+  sidebarSubtitle: {
+    fontSize: 11, color: "#a5b4fc", marginTop: 2,
+  },
+  sidebarDivider: {
+    height: 1, background: "rgba(165,180,252,0.15)",
+    margin: "16px 0",
+  },
+  sidebarUserCard: {
+    display: "flex", alignItems: "center", gap: 10,
+    marginBottom: 12,
+  },
+  sidebarAvatar: {
+    width: 36, height: 36, borderRadius: "50%",
+    background: "#6366f1", color: "#fff",
+    display: "flex", alignItems: "center", justifyContent: "center",
+    fontSize: 13, fontWeight: 700, flexShrink: 0,
+  },
+  sidebarUserInfo: { minWidth: 0 },
+  sidebarUserName: {
+    fontSize: 13, fontWeight: 600, color: "#fff",
+    whiteSpace: "nowrap" as const, overflow: "hidden", textOverflow: "ellipsis",
+  },
+  sidebarUserRole: { fontSize: 11, color: "#a5b4fc" },
+  sidebarMeta: {
+    display: "flex", justifyContent: "space-between", alignItems: "center",
+    marginBottom: 4,
+  },
+  sidebarMetaLabel: { fontSize: 11, color: "#818cf8" },
+  sidebarMetaValue: {
+    fontSize: 11, fontWeight: 600, color: "#c7d2fe",
+    background: "rgba(99,102,241,0.2)", padding: "1px 8px",
+    borderRadius: 20,
+  },
+  sidebarSection: { marginBottom: 12 },
+  sidebarSectionLabel: {
+    fontSize: 10, fontWeight: 600, color: "#818cf8",
+    textTransform: "uppercase" as const, letterSpacing: "0.06em",
+    marginBottom: 6,
+  },
+  sidebarSelect: {
+    width: "100%", padding: "6px 8px", fontSize: 12,
+    borderRadius: 6, border: "1px solid rgba(165,180,252,0.3)",
+    background: "rgba(255,255,255,0.07)", color: "#e0e7ff",
+    cursor: "pointer",
+  },
+  sidebarBtn: {
+    width: "100%", padding: "8px 12px", fontSize: 12, fontWeight: 500,
+    background: "rgba(99,102,241,0.25)", color: "#c7d2fe",
+    border: "1px solid rgba(99,102,241,0.4)",
+    borderRadius: 8, cursor: "pointer", marginBottom: 12,
+    textAlign: "left" as const,
+  },
+  sidebarBottom: { marginTop: "auto", paddingTop: 16 },
   logoutBtn: {
-    padding: "5px 10px", fontSize: 12,
-    background: "#f1f5f9", border: "1px solid #e2e8f0",
-    borderRadius: 6, cursor: "pointer", color: "#475569",
+    width: "100%", padding: "8px 12px", fontSize: 12,
+    background: "rgba(255,255,255,0.06)", color: "#94a3b8",
+    border: "1px solid rgba(255,255,255,0.1)",
+    borderRadius: 8, cursor: "pointer",
   },
 
-  /* Impersonation */
-  impBar: {
-    display: "flex", alignItems: "center", gap: 8,
-    marginBottom: 12, padding: "8px 12px",
-    background: "#fffbeb", borderRadius: 8,
-    border: "1px solid #fde68a",
+  /* Chat history (inside sidebar) */
+  historyToggle: {
+    display: "flex", alignItems: "center", justifyContent: "space-between",
+    width: "100%", padding: "6px 0", fontSize: 12, fontWeight: 600,
+    background: "none", border: "none",
+    cursor: "pointer", color: "#a5b4fc",
+    marginBottom: 6,
   },
-  impLabel: { fontSize: 12, fontWeight: 600, color: "#92400e", whiteSpace: "nowrap" as const },
-  impSelect: {
-    flex: 1, padding: "5px 8px", fontSize: 13,
-    borderRadius: 6, border: "1px solid #fde68a",
-    background: "#fff", cursor: "pointer",
+  historyCount: {
+    fontSize: 10, padding: "1px 6px",
+    background: "rgba(99,102,241,0.35)", color: "#c7d2fe",
+    borderRadius: 20, fontWeight: 500,
+  },
+  historyList: {
+    display: "flex", flexDirection: "column" as const,
+    gap: 6, maxHeight: 260, overflowY: "auto" as const,
+  },
+  historyItem: {
+    padding: "8px 10px",
+    background: "rgba(255,255,255,0.06)",
+    borderRadius: 6,
+    border: "1px solid rgba(165,180,252,0.15)",
+  },
+  historyQ: {
+    fontSize: 11, fontWeight: 600, color: "#c7d2fe", marginBottom: 3,
+  },
+  historyA: {
+    fontSize: 11, color: "#94a3b8", lineHeight: 1.4,
   },
 
-  /* Role badge (non-admin) */
-  roleBadge: {
-    marginBottom: 12, padding: "8px 14px",
-    background: "#eff6ff", borderRadius: 8,
-    border: "1px solid #bfdbfe", fontSize: 13,
+  /* —— Main content —— */
+  main: {
+    flex: 1, padding: "28px 32px", maxWidth: 860,
+    display: "flex", flexDirection: "column" as const,
   },
 
   /* Suggestions */
   suggestions: {
     display: "flex", alignItems: "center", gap: 6,
-    flexWrap: "wrap" as const, marginBottom: 10,
+    flexWrap: "wrap" as const, marginBottom: 12,
   },
   sugLabel: { fontSize: 12, color: "#64748b" },
   sugChip: {
     padding: "5px 12px", fontSize: 12,
     background: "#fff", border: "1px solid #dbeafe",
     borderRadius: 20, cursor: "pointer", color: "#1e40af",
-    transition: "background 0.1s",
   },
 
   /* Query input */
@@ -411,7 +504,7 @@ const s: Record<string, React.CSSProperties> = {
   },
   submitBtn: {
     padding: "10px 22px", fontSize: 14, fontWeight: 600,
-    background: "#2563eb", color: "#fff", border: "none",
+    background: "#6366f1", color: "#fff", border: "none",
     borderRadius: 8, cursor: "pointer",
     whiteSpace: "nowrap" as const,
     display: "flex", alignItems: "center", gap: 6,
@@ -421,6 +514,23 @@ const s: Record<string, React.CSSProperties> = {
     borderTopColor: "transparent", borderRadius: "50%",
     display: "inline-block",
     animation: "spin 0.6s linear infinite",
+  },
+
+  /* Current query */
+  currentQueryBox: {
+    marginBottom: 10, padding: "10px 16px",
+    background: "#fff", borderRadius: 8,
+    border: "1px solid #e2e8f0",
+    borderLeft: "4px solid #6366f1",
+  },
+  currentQueryLabel: {
+    fontSize: 10, fontWeight: 600, color: "#6366f1",
+    textTransform: "uppercase" as const, letterSpacing: "0.06em",
+    display: "block", marginBottom: 4,
+  },
+  currentQueryCode: {
+    margin: 0, fontSize: 13, color: "#1e293b",
+    lineHeight: 1.5, fontStyle: "italic",
   },
 
   /* Error */
@@ -463,7 +573,7 @@ const s: Record<string, React.CSSProperties> = {
   },
   transBadge: {
     fontSize: 10, padding: "1px 6px",
-    background: "#dbeafe", color: "#1e40af",
+    background: "#ede9fe", color: "#6366f1",
     borderRadius: 20, fontWeight: 500,
   },
   sqlContent: {
